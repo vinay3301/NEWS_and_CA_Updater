@@ -100,8 +100,8 @@ MOBILE_DRIVE_FOLDER_NAME = os.environ.get(
 
 
 def india_now():
-    """Return the current time in India, independent of the runner timezone."""
-    return datetime.now(ZoneInfo("Asia/Kolkata"))
+    """Return naive India local time to match the script's existing RSS datetimes."""
+    return datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
 
 EXCLUDE_KEYWORDS = [
     "riddle", "optical illusion", "quiz", "brain teaser", "iq test",

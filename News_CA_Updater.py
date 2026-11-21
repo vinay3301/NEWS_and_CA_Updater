@@ -89,9 +89,9 @@ DOWNLOAD_DIR = os.environ.get(
     "NEWS_CA_OUTPUT_DIR",
     os.path.expanduser("~/storage/downloads")
 )
-DRIVE_FOLDER_ID = os.environ.get(
-    "GOOGLE_DRIVE_FOLDER_ID",
-    "14TKvCUr0k0bH8nADXlUrdIPoqhUJNrGH"
+DRIVE_FOLDER_ID = (
+    os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+    or "14TKvCUr0k0bH8nADXlUrdIPoqhUJNrGH"
 )
 MOBILE_DRIVE_FOLDER_NAME = os.environ.get(
     "MOBILE_DRIVE_FOLDER_NAME",

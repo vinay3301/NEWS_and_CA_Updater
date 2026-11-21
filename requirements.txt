@@ -1,0 +1,7 @@
+requests
+feedparser
+beautifulsoup4
+oauth2client
+google-api-python-client
+reportlab
+tzdata

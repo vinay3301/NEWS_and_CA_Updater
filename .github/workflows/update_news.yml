@@ -57,6 +57,9 @@ jobs:
           print("Service-account JSON structure looks valid.")
           PY
 
+      - name: Check Python syntax
+        run: python -m py_compile News_CA_Updater.py
+
       - name: Generate PDFs and upload both versions to Google Drive
         run: python News_CA_Updater.py
 

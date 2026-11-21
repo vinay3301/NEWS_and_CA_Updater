@@ -3563,7 +3563,13 @@ def run_updates():
         is_desktop=False
     )
 
-    temp_dir = tempfile.gettempdir()
+    # Keep both PDFs in the workflow output directory on GitHub Actions
+    # so they can also be downloaded as a workflow artifact.
+    temp_dir = (
+        DOWNLOAD_DIR
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        else tempfile.gettempdir()
+    )
 
     drive_pdf_temp_path = os.path.join(
         temp_dir,
@@ -3613,8 +3619,9 @@ def run_updates():
         if not mobile_uploaded:
             raise RuntimeError("Mobile PDF upload to Google Drive failed.")
 
-    if os.path.exists(
-        drive_pdf_temp_path
+    if (
+        os.path.exists(drive_pdf_temp_path)
+        and os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
     ):
         os.remove(
             drive_pdf_temp_path

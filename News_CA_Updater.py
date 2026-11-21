@@ -2156,347 +2156,272 @@ def fetch_affairscloud_today_and_yesterday(session):
     return ac_articles
 
 
-def fetch_adda247_previous_3_days(session):
-    show_status(
-        "Scraping Previous 3 Days Current Affairs from Adda247..."
-    )
-
-    cutoff_date_ca = (
-        india_now() - timedelta(days=3)
-    ).date()
-
-    ca_target_urls = [
-        f"https://currentaffairs.adda247.com/"
-        f"?nocache={random.randint(1,999)}",
-
-        f"https://currentaffairs.adda247.com/"
-        f"latest-posts/?nocache={random.randint(1,999)}"
+def _adda_parse_listing_date(text):
+    """Parse common visible and machine-readable Adda247 date formats."""
+    if not text:
+        return None
+    text = sanitize_text(str(text))
+    patterns = [
+        (r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b', "%B %d, %Y"),
+        (r'\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b', "%d %B %Y"),
+        (r'\b\d{4}-\d{2}-\d{2}\b', "%Y-%m-%d")
     ]
+    for pattern, fmt in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                return datetime.strptime(match.group(0), fmt).date()
+            except ValueError:
+                pass
+    return None
 
-    rows_adda = []
-    seen_links = set()
 
-    for url_ca in ca_target_urls:
-        try:
-            resp = session.get(
-                url_ca,
-                headers=HEADERS,
-                timeout=10
-            )
-
-            if resp.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(
-                resp.text,
-                'html.parser'
-            )
-
-            posts = soup.select(
-                'article, li.category_postlist, '
-                'div.post-content, div.entry-header, div.ca-card'
-            )
-
-            for post in posts:
-                a_tag = post.find(
-                    "a",
-                    href=True
+def _adda_date_near_link(a_tag):
+    """Find a single unambiguous date in the link's nearby listing container."""
+    node = a_tag
+    for _ in range(6):
+        if not node:
+            break
+        if isinstance(node, Tag):
+            time_tag = node.find("time")
+            if time_tag:
+                parsed = _adda_parse_listing_date(
+                    time_tag.get("datetime", "") or time_tag.get_text(" ", strip=True)
                 )
-
-                if not a_tag:
-                    continue
-
-                title = sanitize_text(
-                    a_tag.get_text(
-                        strip=True
-                    )
-                )
-
-                if (
-                    len(title) < 15
-                    or any(
-                        w in title.lower()
-                        for w in (
-                            EXCLUDE_KEYWORDS
-                            + ADDA_STATIC_CATEGORY_KEYWORDS
-                        )
-                    )
-                ):
-                    continue
-
-                link = a_tag["href"].strip()
-
-                if (
-                    link in seen_links
-                    or not link.startswith("http")
-                ):
-                    continue
-
-                date_tag = (
-                    post.find(
-                        "p",
-                        class_=lambda c:
-                            c and "date" in c.lower()
-                    )
-                    or
-                    post.find("time")
-                    or
-                    post.find(
-                        "span",
-                        class_=lambda c:
-                            c and "date" in c.lower()
-                    )
-                )
-
-                date_str = (
-                    date_tag.get_text(
-                        strip=True
-                    )
-                    if date_tag
-                    else
-                    india_now().strftime(
-                        "%B %d, %Y"
-                    )
-                )
-
-                try:
-                    match = re.search(
-                        r'(January|February|March|April|May|June|July|August|September|October|November|December)'
-                        r'\s+\d{1,2},\s+\d{4}',
-                        date_str
-                    )
-
-                    article_date = (
-                        datetime.strptime(
-                            match.group(0),
-                            "%B %d, %Y"
-                        ).date()
-                        if match
-                        else
-                        india_now().date()
-                    )
-
-                except Exception:
-                    article_date = (
-                        india_now().date()
-                    )
-
-                if article_date >= cutoff_date_ca:
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
-                            session,
-                            link,
-                            title
-                        )
-                    )
-
-                    seen_links.add(link)
-
-                    rows_adda.append(
-                        {
-                            'ts': article_date,
-                            'source_name': 'Adda247',
-                            'date_label':
-                                f"Adda247 "
-                                f"({article_date.strftime('%d %b %Y')})",
-                            'title': title,
-                            'desc': plain_desc,
-                            'plain_text': plain_desc,
-                            'structured_content':
-                                structured_data,
-                            'image_url': img_url,
-                            'raw_link': link
-                        }
-                    )
-
-        except Exception as e:
-            print(
-                f"[!] Adda247 CA HTML scraping issue "
-                f"for {url_ca}: {e}"
+                if parsed:
+                    return parsed
+            dates = []
+            pattern = (
+                r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b'
+                r'|\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b'
+                r'|\b\d{4}-\d{2}-\d{2}\b'
             )
+            for value in re.findall(pattern, node.get_text(" ", strip=True), re.IGNORECASE):
+                parsed = _adda_parse_listing_date(value)
+                if parsed and parsed not in dates:
+                    dates.append(parsed)
+            if len(dates) == 1:
+                return dates[0]
+        node = node.parent
+    return None
 
-    rows_adda.sort(
-        key=lambda x: x['ts'],
-        reverse=True
-    )
 
-    return rows_adda
+def _adda_listing_links(soup, page_url):
+    """Discover article links without depending on Adda247 theme CSS classes."""
+    from urllib.parse import urljoin, urlparse
+
+    results = []
+    seen = set()
+    for a_tag in soup.find_all("a", href=True):
+        title = sanitize_text(a_tag.get_text(" ", strip=True))
+        if len(title) < 15:
+            continue
+        link = urljoin(page_url, a_tag["href"].strip())
+        parsed = urlparse(link)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.rstrip("/").lower()
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if host not in ("currentaffairs.adda247.com", "www.currentaffairs.adda247.com"):
+            continue
+        if (
+            not path
+            or path in ("/latest-posts", "/banking-current-affairs")
+            or path.startswith(("/category/", "/tag/", "/author/", "/page/"))
+            or "/wp-content/" in path
+            or link in seen
+        ):
+            continue
+        if any(word in title.lower() for word in EXCLUDE_KEYWORDS + ADDA_STATIC_CATEGORY_KEYWORDS):
+            continue
+        seen.add(link)
+        results.append((a_tag, title, link))
+    return results
 
 
-def fetch_banking_current_affairs(
-    session,
-    cutoff_days=90
-):
-    show_status(
-        "Scraping Banking & RBI Current Affairs (Adda247)..."
-    )
-
-    cutoff_date = (
-        india_now()
-        - timedelta(days=cutoff_days)
-    ).date()
-
-    base_url = (
-        "https://currentaffairs.adda247.com/"
-        "banking-current-affairs/"
-    )
-
-    rows_banking = []
-    seen_links = set()
-
-    page = 1
-    keep_scraping = True
-
-    while keep_scraping:
-        target_url = (
-            f"{base_url}?nocache="
-            f"{random.randint(1,999)}"
-            if page == 1
-            else
-            f"{base_url}?lcp_page0={page}"
-            f"#lcp_instance_0"
+def _adda_article_date_from_page(session, link):
+    """Fallback to WordPress/SEO metadata if the listing has no visible date."""
+    try:
+        response = session.get(link, headers=HEADERS, timeout=12)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.text, "html.parser")
+        meta = (
+            soup.find("meta", property="article:published_time")
+            or soup.find("meta", attrs={"name": "date"})
+            or soup.find("meta", property="og:updated_time")
+            or soup.find("time", attrs={"datetime": True})
         )
+        if not meta:
+            return None
+        return _adda_parse_listing_date(
+            meta.get("content", "") or meta.get("datetime", "")
+            or meta.get_text(" ", strip=True)
+        )
+    except Exception as exc:
+        print(f"[!] Could not read Adda247 article date for {link}: {exc}")
+        return None
 
+
+def fetch_adda247_previous_3_days(session):
+    show_status("Scraping Previous 3 Days Current Affairs from Adda247...")
+    cutoff = (india_now() - timedelta(days=3)).date()
+    urls = [
+        f"https://currentaffairs.adda247.com/?nocache={random.randint(1,999)}",
+        f"https://currentaffairs.adda247.com/latest-posts/?nocache={random.randint(1,999)}"
+    ]
+    rows = []
+    seen = set()
+
+    for listing_url in urls:
         try:
-            resp = session.get(
-                target_url,
-                headers=HEADERS,
-                timeout=12
-            )
+            response = session.get(listing_url, headers=HEADERS, timeout=15)
+            if response.status_code != 200:
+                print(f"[!] Adda247 listing HTTP {response.status_code}: {listing_url}")
+                continue
+            soup = BeautifulSoup(response.text, "html.parser")
+            candidates = _adda_listing_links(soup, response.url or listing_url)
+            added = 0
 
-            if resp.status_code != 200:
-                break
-
-            soup = BeautifulSoup(
-                resp.text,
-                'html.parser'
-            )
-
-            container = soup.find(
-                'ul',
-                class_='lcp_catlist'
-            )
-
-            if not container:
-                break
-
-            items = container.find_all('li')
-
-            if not items:
-                break
-
-            page_had_valid = False
-
-            for li in items:
-                desc_div = li.find(
-                    'div',
-                    class_='desc'
-                )
-
-                if not desc_div:
+            for a_tag, title, link in candidates:
+                if link in seen:
+                    continue
+                article_date = _adda_date_near_link(a_tag)
+                if article_date is None:
+                    article_date = _adda_article_date_from_page(session, link)
+                # Do not assign today's date to an undated older article.
+                if article_date is None or article_date < cutoff:
                     continue
 
-                a_tag = desc_div.find(
-                    'a',
-                    href=True
+                desc, structured, image_url = extract_affairscloud_rich_content(
+                    session, link, title
                 )
+                seen.add(link)
+                rows.append({
+                    "ts": article_date,
+                    "source_name": "Adda247",
+                    "date_label": f"Adda247 ({article_date.strftime('%d %b %Y')})",
+                    "title": title,
+                    "desc": desc,
+                    "plain_text": desc,
+                    "structured_content": structured,
+                    "image_url": image_url,
+                    "raw_link": link
+                })
+                added += 1
 
-                if not a_tag:
-                    continue
+            print(
+                f"[*] Adda247 listing: {len(candidates)} candidate links; "
+                f"{added} recent articles from {listing_url}"
+            )
+        except Exception as exc:
+            print(f"[!] Adda247 CA HTML scraping issue for {listing_url}: {exc}")
 
-                link = a_tag['href'].strip()
+    rows.sort(key=lambda item: item["ts"], reverse=True)
+    print(f"[*] Adda247 previous-3-days total: {len(rows)} articles")
+    return rows
 
-                title = sanitize_text(
-                    a_tag.get_text(
-                        strip=True
-                    )
-                )
 
-                if (
-                    link in seen_links
-                    or len(title) < 15
-                    or any(
-                        w in title.lower()
-                        for w in (
-                            EXCLUDE_KEYWORDS
-                            + ADDA_STATIC_CATEGORY_KEYWORDS
-                        )
-                    )
-                ):
-                    continue
+def fetch_banking_current_affairs(session, cutoff_days=90):
+    show_status("Scraping Banking & RBI Current Affairs (Adda247)...")
+    cutoff = (india_now() - timedelta(days=cutoff_days)).date()
+    base_url = "https://currentaffairs.adda247.com/banking-current-affairs/"
+    rows = []
+    seen_links = set()
+    seen_pages = set()
+    page = 1
+    target_url = f"{base_url}?nocache={random.randint(1,999)}"
 
-                date_p = desc_div.find('p')
-
-                article_date = (
-                    india_now().date()
-                )
-
-                if date_p:
-                    match = re.search(
-                        r'(January|February|March|April|May|June|July|August|September|October|November|December)'
-                        r'\s+\d{1,2},\s+\d{4}',
-                        date_p.get_text()
-                    )
-
-                    if match:
-                        try:
-                            article_date = datetime.strptime(
-                                match.group(0),
-                                "%B %d, %Y"
-                            ).date()
-                        except ValueError:
-                            pass
-
-                if article_date >= cutoff_date:
-                    page_had_valid = True
-
-                    seen_links.add(link)
-
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
-                            session,
-                            link,
-                            title
-                        )
-                    )
-
-                    rows_banking.append(
-                        {
-                            'ts': article_date,
-                            'source_name':
-                                'Banking Current Affairs',
-                            'date_label':
-                                article_date.strftime(
-                                    "%d %b %Y"
-                                ),
-                            'title': title,
-                            'desc': plain_desc,
-                            'plain_text': plain_desc,
-                            'structured_content':
-                                structured_data,
-                            'image_url': img_url,
-                            'raw_link': link
-                        }
-                    )
-
-                else:
-                    keep_scraping = False
-
-            if not page_had_valid:
+    # Bound pagination to prevent loops if the website returns a repeated page.
+    while target_url and page <= 10:
+        if target_url in seen_pages:
+            break
+        seen_pages.add(target_url)
+        try:
+            response = session.get(target_url, headers=HEADERS, timeout=15)
+            if response.status_code != 200:
+                print(f"[!] Adda247 Banking page {page}: HTTP {response.status_code}")
                 break
+            soup = BeautifulSoup(response.text, "html.parser")
+            candidates = _adda_listing_links(soup, response.url or target_url)
+            added = 0
+            oldest_date = None
+
+            for a_tag, title, link in candidates:
+                if link in seen_links:
+                    continue
+                article_date = _adda_date_near_link(a_tag)
+                if article_date is None:
+                    article_date = _adda_article_date_from_page(session, link)
+                if article_date is None:
+                    continue
+
+                if oldest_date is None or article_date < oldest_date:
+                    oldest_date = article_date
+                seen_links.add(link)
+                if article_date < cutoff:
+                    continue
+
+                desc, structured, image_url = extract_affairscloud_rich_content(
+                    session, link, title
+                )
+                rows.append({
+                    "ts": article_date,
+                    "source_name": "Banking Current Affairs",
+                    "date_label": article_date.strftime("%d %b %Y"),
+                    "title": title,
+                    "desc": desc,
+                    "plain_text": desc,
+                    "structured_content": structured,
+                    "image_url": image_url,
+                    "raw_link": link
+                })
+                added += 1
+
+            print(
+                f"[*] Adda247 Banking page {page}: {len(candidates)} candidates; "
+                f"{added} within {cutoff_days} days"
+            )
+            if oldest_date is not None and oldest_date < cutoff:
+                break
+            if not candidates:
+                break
+
+            next_link = (
+                soup.find("a", rel=lambda value: value and "next" in (
+                    value if isinstance(value, list) else [value]
+                ))
+                or soup.find("a", class_=lambda value: value and "next" in (
+                    value if isinstance(value, list) else [value]
+                ))
+            )
+            if not next_link:
+                for a_tag in soup.find_all("a", href=True):
+                    label = sanitize_text(a_tag.get_text(" ", strip=True)).lower()
+                    if label in ("next", "next »", "»", "older posts"):
+                        next_link = a_tag
+                        break
+
+            if next_link and next_link.get("href"):
+                from urllib.parse import urljoin, urlparse
+                candidate_url = urljoin(response.url or target_url, next_link["href"])
+                parsed = urlparse(candidate_url)
+                if not parsed.hostname or not parsed.hostname.lower().endswith("adda247.com"):
+                    break
+                target_url = candidate_url
+            else:
+                # Legacy LCP pagination remains as a fallback.
+                target_url = f"{base_url}?lcp_page0={page + 1}#lcp_instance_0"
 
             page += 1
             time.sleep(1)
-
-        except Exception as e:
-            print(
-                f"[!] Error processing Banking CA "
-                f"page {page}: {e}"
-            )
+        except Exception as exc:
+            print(f"[!] Error processing Banking CA page {page}: {exc}")
             break
 
-    return rows_banking
-
+    rows.sort(key=lambda item: item["ts"], reverse=True)
+    print(f"[*] Adda247 Banking/RBI total: {len(rows)} articles")
+    return rows
 
 def draw_page_decorations(canvas, doc):
     if doc.page > 1:

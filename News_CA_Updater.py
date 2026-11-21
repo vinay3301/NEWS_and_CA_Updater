@@ -15,6 +15,7 @@ import urllib.request
 from io import BytesIO
 from bs4 import BeautifulSoup, NavigableString, Tag
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from oauth2client.service_account import ServiceAccountCredentials
 
 # === GOOGLE DRIVE API IMPORTS ===
@@ -75,6 +76,8 @@ else:
     BOLD_FONT = 'Helvetica-Bold'
 
 # === CONFIGURATION ===
+# Keep the existing Android/Pydroid paths for local runs. GitHub Actions
+# supplies NEWS_CA_OUTPUT_DIR and GOOGLE_SERVICE_ACCOUNT_JSON as environment variables.
 JSON_FILE = "/storage/emulated/0/pydroidScripts/Script_for_SMS/fifth-composite-489705-v5-d06baf7f990f.json"
 
 if not os.path.exists(JSON_FILE):
@@ -82,8 +85,23 @@ if not os.path.exists(JSON_FILE):
         "~/Script_for_SMS/fifth-composite-489705-v5-d06baf7f990f.json"
     )
 
-DOWNLOAD_DIR = os.path.expanduser("~/storage/downloads")
-DRIVE_FOLDER_ID = "14TKvCUr0k0bH8nADXlUrdIPoqhUJNrGH"
+DOWNLOAD_DIR = os.environ.get(
+    "NEWS_CA_OUTPUT_DIR",
+    os.path.expanduser("~/storage/downloads")
+)
+DRIVE_FOLDER_ID = os.environ.get(
+    "GOOGLE_DRIVE_FOLDER_ID",
+    "14TKvCUr0k0bH8nADXlUrdIPoqhUJNrGH"
+)
+MOBILE_DRIVE_FOLDER_NAME = os.environ.get(
+    "MOBILE_DRIVE_FOLDER_NAME",
+    "Mobile"
+)
+
+
+def india_now():
+    """Return the current time in India, independent of the runner timezone."""
+    return datetime.now(ZoneInfo("Asia/Kolkata"))
 
 EXCLUDE_KEYWORDS = [
     "riddle", "optical illusion", "quiz", "brain teaser", "iq test",
@@ -377,10 +395,84 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    JSON_FILE,
-    SCOPE
-)
+# GitHub Actions receives the service-account JSON as a repository secret.
+# Local Android/Pydroid execution continues to use the existing JSON file.
+_service_account_json = os.environ.get(
+    "GOOGLE_SERVICE_ACCOUNT_JSON",
+    ""
+).strip()
+
+if _service_account_json:
+    try:
+        _service_account_info = json.loads(_service_account_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."
+        ) from exc
+
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        _service_account_info,
+        SCOPE
+    )
+else:
+    if not os.path.exists(JSON_FILE):
+        raise FileNotFoundError(
+            "Google service-account JSON was not found. Set "
+            "GOOGLE_SERVICE_ACCOUNT_JSON in GitHub Actions or place the "
+            "existing JSON file at the configured local path."
+        )
+
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        JSON_FILE,
+        SCOPE
+    )
+
+
+def get_or_create_drive_subfolder(
+    parent_folder_id,
+    folder_name,
+    credentials
+):
+    """Find a named child folder in Drive or create it if it does not exist."""
+    drive_service = build(
+        'drive',
+        'v3',
+        credentials=credentials
+    )
+
+    query = (
+        f"'{parent_folder_id}' in parents "
+        f"and name = '{folder_name}' "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+
+    folders = results.get('files', [])
+    if folders:
+        return folders[0]['id']
+
+    created = drive_service.files().create(
+        body={
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_folder_id]
+        },
+        fields='id, name',
+        supportsAllDrives=True
+    ).execute()
+
+    print(
+        f"{COLORS['GREEN']}[+] Created Google Drive folder: "
+        f"{folder_name} (ID: {created.get('id')}){COLORS['RESET']}"
+    )
+    return created['id']
 
 
 def upload_pdf_to_drive(
@@ -407,7 +499,11 @@ def upload_pdf_to_drive(
             print(
                 f"[!] Target folder access check failed: {f_err}"
             )
-            return
+            if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+                raise RuntimeError(
+                    f"Google Drive folder is not accessible: {folder_id}"
+                ) from f_err
+            return False
 
         query = (
             f"'{folder_id}' in parents "
@@ -441,9 +537,10 @@ def upload_pdf_to_drive(
 
             print(
                 f"{COLORS['GREEN']}[+] Successfully updated "
-                f"Desktop PDF on Google Drive "
+                f"{target_name} on Google Drive "
                 f"(ID: {file_id}){COLORS['RESET']}"
             )
+            return True
 
         else:
             file_metadata = {
@@ -459,15 +556,19 @@ def upload_pdf_to_drive(
             ).execute()
 
             print(
-                f"{COLORS['GREEN']}[+] Created new Desktop PDF "
-                f"on Google Drive "
+                f"{COLORS['GREEN']}[+] Created new PDF "
+                f"{target_name} on Google Drive "
                 f"(ID: {new_file.get('id')}){COLORS['RESET']}"
             )
+            return True
 
     except Exception as e:
         print(
             f"[!] Google Drive upload failed: {e}"
         )
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            raise
+        return False
 
 
 # === ADVANCED HTML COLOR AND FORMATTING EXTRACTOR ===
@@ -2605,7 +2706,7 @@ def generate_pdf_document(
 
     story = []
 
-    today_str = datetime.now().strftime(
+    today_str = india_now().strftime(
         "%d %B %Y"
     )
 
@@ -2619,7 +2720,7 @@ def generate_pdf_document(
     story.append(
         Paragraph(
             f"Last Updated: "
-            f"{datetime.now().strftime('%d %b %Y, %H:%M IST')}",
+            f"{india_now().strftime('%d %b %Y, %H:%M IST')}",
             updated_time_style
         )
     )
@@ -3231,10 +3332,13 @@ def generate_pdf_document(
 # === MAIN PIPELINE RUNNER ===
 def run_updates():
     if not check_internet():
-        print(
-            f"[{datetime.now()}] Device offline, "
+        message = (
+            f"[{india_now()}] Device offline, "
             f"skipping PDF generation and Google Drive sync."
         )
+        print(message)
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            raise RuntimeError(message)
         return
 
     session = requests.Session()
@@ -3480,12 +3584,34 @@ def run_updates():
         "95% - Uploading Desktop PDF to Google Drive..."
     )
 
-    upload_pdf_to_drive(
+    desktop_uploaded = upload_pdf_to_drive(
         drive_pdf_temp_path,
         DRIVE_FOLDER_ID,
         creds,
         target_name="Daily_Articles.pdf"
     )
+
+    # GitHub also publishes the mobile layout in a dedicated Drive subfolder.
+    # FolderSync/other Android sync apps can then sync only this folder.
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        if not desktop_uploaded:
+            raise RuntimeError("Desktop PDF upload to Google Drive failed.")
+
+        mobile_folder_id = get_or_create_drive_subfolder(
+            DRIVE_FOLDER_ID,
+            MOBILE_DRIVE_FOLDER_NAME,
+            creds
+        )
+
+        mobile_uploaded = upload_pdf_to_drive(
+            local_pdf_path,
+            mobile_folder_id,
+            creds,
+            target_name="Daily_Articles_Mobile.pdf"
+        )
+
+        if not mobile_uploaded:
+            raise RuntimeError("Mobile PDF upload to Google Drive failed.")
 
     if os.path.exists(
         drive_pdf_temp_path
@@ -3498,8 +3624,11 @@ def run_updates():
         "100% - Processing Complete!"
     )
 
-    # 6. TRIGGER TERMUX NOTIFICATION
-    if notif_lines:
+    # 6. TRIGGER TERMUX NOTIFICATION (local Android runs only)
+    if (
+        notif_lines
+        and os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
+    ):
         summary_metrics = [
             f"📊 Articles -> News: "
             f"{len(all_news)} | "

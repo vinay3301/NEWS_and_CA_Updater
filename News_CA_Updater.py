@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 # === GOOGLE DRIVE API IMPORTS ===
 from googleapiclient.discovery import build
@@ -391,41 +392,36 @@ def extract_rss_image(entry):
 
 
 # === GOOGLE AUTHENTICATION & DRIVE UPLOADER ===
-SCOPE = [
-    "https://www.googleapis.com/auth/drive"
-]
+SCOPE = ["https://www.googleapis.com/auth/drive"]
 
-# GitHub Actions receives the service-account JSON as a repository secret.
-# Local Android/Pydroid execution continues to use the existing JSON file.
-_service_account_json = os.environ.get(
-    "GOOGLE_SERVICE_ACCOUNT_JSON",
-    ""
-).strip()
+# GitHub Actions should use the user's Google account via OAuth refresh token.
+# This avoids the storage-quota limitation of service accounts when creating files.
+_oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+_oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+_oauth_refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
 
-if _service_account_json:
-    try:
-        _service_account_info = json.loads(_service_account_json)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."
-        ) from exc
-
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        _service_account_info,
-        SCOPE
+if _oauth_client_id and _oauth_client_secret and _oauth_refresh_token:
+    creds = GoogleOAuthCredentials(
+        token=None,
+        refresh_token=_oauth_refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=_oauth_client_id,
+        client_secret=_oauth_client_secret,
+        scopes=SCOPE
+    )
+elif os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+    raise RuntimeError(
+        "Google OAuth secrets are missing. Configure "
+        "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and "
+        "GOOGLE_OAUTH_REFRESH_TOKEN in GitHub Actions repository secrets."
     )
 else:
+    # Preserve existing Android/Pydroid service-account authentication locally.
     if not os.path.exists(JSON_FILE):
         raise FileNotFoundError(
-            "Google service-account JSON was not found. Set "
-            "GOOGLE_SERVICE_ACCOUNT_JSON in GitHub Actions or place the "
-            "existing JSON file at the configured local path."
+            "Google service-account JSON was not found at the configured local path."
         )
-
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        JSON_FILE,
-        SCOPE
-    )
+    creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, SCOPE)
 
 
 def get_or_create_drive_subfolder(

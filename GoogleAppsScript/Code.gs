@@ -79,7 +79,7 @@ function doPost(e) {
         { name: fileName, mimeType: 'application/pdf' },
         existing.id,
         blob,
-        { supportsAllDrives: true }
+        { supportsAllDrives: true, fields: 'id,name,mimeType,size,webViewLink' }
       );
     } else {
       saved = Drive.Files.create(
@@ -116,9 +116,8 @@ function getOrCreateSubfolder(parentFolder, folderName) {
 }
 
 function findFileInFolder(folderId, fileName) {
-  const escapedName = fileName.replace(/\\'/g, "\\\\'");
   const response = Drive.Files.list({
-    q: "'" + folderId + "' in parents and name = '" + escapedName + "' and trashed = false",
+    q: "'" + folderId + "' in parents and name = '" + fileName + "' and trashed = false",
     pageSize: 10,
     fields: 'files(id,name)',
     supportsAllDrives: true,

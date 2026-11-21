@@ -2156,6 +2156,153 @@ def fetch_affairscloud_today_and_yesterday(session):
     return ac_articles
 
 
+def _adda_parse_listing_date(text):
+    """Parse a date shown beside an Adda247 listing entry."""
+    if not text:
+        return None
+
+    text = sanitize_text(str(text))
+
+    patterns = [
+        (
+            r'\b(January|February|March|April|May|June|July|August|'
+            r'September|October|November|December)\s+\d{1,2},\s+\d{4}\b',
+            "%B %d, %Y"
+        ),
+        (
+            r'\b\d{1,2}\s+(January|February|March|April|May|June|July|'
+            r'August|September|October|November|December)\s+\d{4}\b',
+            "%d %B %Y"
+        ),
+        (
+            r'\b\d{4}-\d{2}-\d{2}\b',
+            "%Y-%m-%d"
+        )
+    ]
+
+    for pattern, date_format in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                return datetime.strptime(
+                    match.group(0),
+                    date_format
+                ).date()
+            except ValueError:
+                continue
+
+    return None
+
+
+def _adda_date_near_link(a_tag):
+    """
+    Find the date belonging to a listing link without depending on
+    Adda247's CSS class names. A date is accepted only when the nearby
+    ancestor contains exactly one date, preventing dates from adjacent
+    articles being assigned to the wrong headline.
+    """
+    node = a_tag
+
+    for _ in range(6):
+        if not node:
+            break
+
+        text = node.get_text(" ", strip=True)
+        matches = re.findall(
+            r'\b(?:January|February|March|April|May|June|July|August|'
+            r'September|October|November|December)\s+\d{1,2},\s+\d{4}\b'
+            r'|\b\d{1,2}\s+(?:January|February|March|April|May|June|'
+            r'July|August|September|October|November|December)\s+\d{4}\b'
+            r'|\b\d{4}-\d{2}-\d{2}\b',
+            text,
+            re.IGNORECASE
+        )
+
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) == 1:
+            parsed = _adda_parse_listing_date(unique_matches[0])
+            if parsed:
+                return parsed
+
+        # Some WordPress themes put the date in a time element with
+        # a machine-readable datetime attribute.
+        time_tag = node.find("time") if isinstance(node, Tag) else None
+        if time_tag:
+            parsed = _adda_parse_listing_date(
+                time_tag.get("datetime", "")
+                or time_tag.get_text(" ", strip=True)
+            )
+            if parsed:
+                return parsed
+
+        node = node.parent
+
+    return None
+
+
+def _adda_listing_links(soup, page_url):
+    """
+    Collect likely Adda247 article links from the page content.
+    This deliberately does not depend on article/list CSS classes.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    candidates = []
+    seen = set()
+
+    for a_tag in soup.find_all("a", href=True):
+        title = sanitize_text(a_tag.get_text(" ", strip=True))
+        if len(title) < 15:
+            continue
+
+        href = urljoin(page_url, a_tag["href"].strip())
+        parsed = urlparse(href)
+
+        if parsed.scheme not in ("http", "https"):
+            continue
+
+        host = (parsed.hostname or "").lower()
+        if host not in (
+            "currentaffairs.adda247.com",
+            "www.currentaffairs.adda247.com"
+        ):
+            continue
+
+        path = parsed.path.rstrip("/").lower()
+        if (
+            not path
+            or path in (
+                "/latest-posts",
+                "/banking-current-affairs"
+            )
+            or path.startswith((
+                "/category/",
+                "/tag/",
+                "/author/",
+                "/page/"
+            ))
+            or "/wp-content/" in path
+        ):
+            continue
+
+        if href in seen:
+            continue
+
+        if any(
+            word in title.lower()
+            for word in (
+                EXCLUDE_KEYWORDS
+                + ADDA_STATIC_CATEGORY_KEYWORDS
+            )
+        ):
+            continue
+
+        seen.add(href)
+        candidates.append((a_tag, title, href))
+
+    return candidates
+
+
 def fetch_adda247_previous_3_days(session):
     show_status(
         "Scraping Previous 3 Days Current Affairs from Adda247..."
@@ -2181,133 +2328,113 @@ def fetch_adda247_previous_3_days(session):
             resp = session.get(
                 url_ca,
                 headers=HEADERS,
-                timeout=10
+                timeout=15
             )
 
             if resp.status_code != 200:
+                print(
+                    f"[!] Adda247 listing returned HTTP "
+                    f"{resp.status_code}: {url_ca}"
+                )
                 continue
 
             soup = BeautifulSoup(
                 resp.text,
-                'html.parser'
+                "html.parser"
             )
 
-            posts = soup.select(
-                'article, li.category_postlist, '
-                'div.post-content, div.entry-header, div.ca-card'
+            candidates = _adda_listing_links(
+                soup,
+                resp.url or url_ca
             )
 
-            for post in posts:
-                a_tag = post.find(
-                    "a",
-                    href=True
-                )
+            page_count = 0
 
-                if not a_tag:
+            for a_tag, title, link in candidates:
+                if link in seen_links:
                     continue
 
-                title = sanitize_text(
-                    a_tag.get_text(
-                        strip=True
-                    )
-                )
+                article_date = _adda_date_near_link(a_tag)
 
-                if (
-                    len(title) < 15
-                    or any(
-                        w in title.lower()
-                        for w in (
-                            EXCLUDE_KEYWORDS
-                            + ADDA_STATIC_CATEGORY_KEYWORDS
-                        )
-                    )
-                ):
-                    continue
-
-                link = a_tag["href"].strip()
-
-                if (
-                    link in seen_links
-                    or not link.startswith("http")
-                ):
-                    continue
-
-                date_tag = (
-                    post.find(
-                        "p",
-                        class_=lambda c:
-                            c and "date" in c.lower()
-                    )
-                    or
-                    post.find("time")
-                    or
-                    post.find(
-                        "span",
-                        class_=lambda c:
-                            c and "date" in c.lower()
-                    )
-                )
-
-                date_str = (
-                    date_tag.get_text(
-                        strip=True
-                    )
-                    if date_tag
-                    else
-                    india_now().strftime(
-                        "%B %d, %Y"
-                    )
-                )
-
-                try:
-                    match = re.search(
-                        r'(January|February|March|April|May|June|July|August|September|October|November|December)'
-                        r'\s+\d{1,2},\s+\d{4}',
-                        date_str
-                    )
-
-                    article_date = (
-                        datetime.strptime(
-                            match.group(0),
-                            "%B %d, %Y"
-                        ).date()
-                        if match
-                        else
-                        india_now().date()
-                    )
-
-                except Exception:
-                    article_date = (
-                        india_now().date()
-                    )
-
-                if article_date >= cutoff_date_ca:
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
-                            session,
+                # If the date is not present in the listing markup,
+                # inspect common machine-readable date metadata on
+                # the article page rather than silently assigning today.
+                if article_date is None:
+                    try:
+                        article_resp = session.get(
                             link,
-                            title
+                            headers=HEADERS,
+                            timeout=12
                         )
-                    )
+                        if article_resp.status_code == 200:
+                            article_soup = BeautifulSoup(
+                                article_resp.text,
+                                "html.parser"
+                            )
+                            date_meta = (
+                                article_soup.find(
+                                    "meta",
+                                    property="article:published_time"
+                                )
+                                or article_soup.find(
+                                    "meta",
+                                    attrs={"name": "date"}
+                                )
+                                or article_soup.find(
+                                    "time",
+                                    attrs={"datetime": True}
+                                )
+                            )
+                            if date_meta:
+                                article_date = _adda_parse_listing_date(
+                                    date_meta.get("content", "")
+                                    or date_meta.get("datetime", "")
+                                    or date_meta.get_text(" ", strip=True)
+                                )
+                    except Exception as date_error:
+                        print(
+                            f"[!] Could not read Adda247 date for "
+                            f"{link}: {date_error}"
+                        )
 
-                    seen_links.add(link)
+                if article_date is None:
+                    continue
 
-                    rows_adda.append(
-                        {
-                            'ts': article_date,
-                            'source_name': 'Adda247',
-                            'date_label':
-                                f"Adda247 "
-                                f"({article_date.strftime('%d %b %Y')})",
-                            'title': title,
-                            'desc': plain_desc,
-                            'plain_text': plain_desc,
-                            'structured_content':
-                                structured_data,
-                            'image_url': img_url,
-                            'raw_link': link
-                        }
+                if article_date < cutoff_date_ca:
+                    continue
+
+                plain_desc, structured_data, img_url = (
+                    extract_affairscloud_rich_content(
+                        session,
+                        link,
+                        title
                     )
+                )
+
+                seen_links.add(link)
+
+                rows_adda.append(
+                    {
+                        "ts": article_date,
+                        "source_name": "Adda247",
+                        "date_label":
+                            f"Adda247 "
+                            f"({article_date.strftime('%d %b %Y')})",
+                        "title": title,
+                        "desc": plain_desc,
+                        "plain_text": plain_desc,
+                        "structured_content": structured_data,
+                        "image_url": img_url,
+                        "raw_link": link
+                    }
+                )
+                page_count += 1
+
+            print(
+                f"[*] Adda247 listing parsed {len(candidates)} "
+                f"candidate links; added {page_count} recent articles "
+                f"from {url_ca}"
+            )
 
         except Exception as e:
             print(
@@ -2316,11 +2443,57 @@ def fetch_adda247_previous_3_days(session):
             )
 
     rows_adda.sort(
-        key=lambda x: x['ts'],
+        key=lambda x: x["ts"],
         reverse=True
     )
 
+    print(
+        f"[*] Adda247 previous-3-days total: {len(rows_adda)} articles"
+    )
     return rows_adda
+
+
+def _adda_next_banking_page(soup, current_page, base_url):
+    """Return Adda247's actual next-page URL when exposed in pagination."""
+    from urllib.parse import urljoin, urlparse
+
+    next_link = (
+        soup.find("a", rel=lambda value:
+            value and "next" in (
+                value if isinstance(value, list) else [value]
+            ))
+        or soup.find(
+            "a",
+            class_=lambda value:
+                value and "next" in (
+                    value if isinstance(value, list) else [value]
+                )
+        )
+    )
+
+    if not next_link:
+        for a_tag in soup.find_all("a", href=True):
+            label = sanitize_text(a_tag.get_text(" ", strip=True)).lower()
+            if label in ("next", "next »", "»", "older posts"):
+                next_link = a_tag
+                break
+
+    if next_link and next_link.get("href"):
+        candidate = urljoin(base_url, next_link["href"])
+        parsed = urlparse(candidate)
+        if (
+            parsed.hostname
+            and parsed.hostname.lower().endswith("adda247.com")
+            and candidate != base_url
+        ):
+            return candidate
+
+    # Keep the legacy LCP pagination route as a fallback for installations
+    # that still use that plugin, but do not require its list CSS classes.
+    return (
+        f"{base_url}?lcp_page0={current_page + 1}"
+        f"#lcp_instance_0"
+    )
 
 
 def fetch_banking_current_affairs(
@@ -2343,148 +2516,155 @@ def fetch_banking_current_affairs(
 
     rows_banking = []
     seen_links = set()
+    seen_pages = set()
 
     page = 1
-    keep_scraping = True
+    target_url = (
+        f"{base_url}?nocache={random.randint(1,999)}"
+    )
 
-    while keep_scraping:
-        target_url = (
-            f"{base_url}?nocache="
-            f"{random.randint(1,999)}"
-            if page == 1
-            else
-            f"{base_url}?lcp_page0={page}"
-            f"#lcp_instance_0"
-        )
+    # A hard ceiling protects the scheduled workflow from a broken
+    # pagination link or a site loop.
+    while target_url and page <= 10:
+        if target_url in seen_pages:
+            break
+        seen_pages.add(target_url)
 
         try:
             resp = session.get(
                 target_url,
                 headers=HEADERS,
-                timeout=12
+                timeout=15
             )
 
             if resp.status_code != 200:
+                print(
+                    f"[!] Adda247 Banking page {page} returned "
+                    f"HTTP {resp.status_code}"
+                )
                 break
 
             soup = BeautifulSoup(
                 resp.text,
-                'html.parser'
+                "html.parser"
             )
 
-            container = soup.find(
-                'ul',
-                class_='lcp_catlist'
+            candidates = _adda_listing_links(
+                soup,
+                resp.url or target_url
             )
 
-            if not container:
-                break
+            page_new_count = 0
+            oldest_date_on_page = None
 
-            items = container.find_all('li')
-
-            if not items:
-                break
-
-            page_had_valid = False
-
-            for li in items:
-                desc_div = li.find(
-                    'div',
-                    class_='desc'
-                )
-
-                if not desc_div:
+            for a_tag, title, link in candidates:
+                if link in seen_links:
                     continue
 
-                a_tag = desc_div.find(
-                    'a',
-                    href=True
-                )
+                article_date = _adda_date_near_link(a_tag)
 
-                if not a_tag:
+                if article_date is None:
+                    # Try article metadata if the list item has no
+                    # visible date. This avoids treating undated links
+                    # as today's news.
+                    try:
+                        article_resp = session.get(
+                            link,
+                            headers=HEADERS,
+                            timeout=12
+                        )
+                        if article_resp.status_code == 200:
+                            article_soup = BeautifulSoup(
+                                article_resp.text,
+                                "html.parser"
+                            )
+                            date_meta = (
+                                article_soup.find(
+                                    "meta",
+                                    property="article:published_time"
+                                )
+                                or article_soup.find(
+                                    "meta",
+                                    attrs={"name": "date"}
+                                )
+                                or article_soup.find(
+                                    "time",
+                                    attrs={"datetime": True}
+                                )
+                            )
+                            if date_meta:
+                                article_date = _adda_parse_listing_date(
+                                    date_meta.get("content", "")
+                                    or date_meta.get("datetime", "")
+                                    or date_meta.get_text(" ", strip=True)
+                                )
+                    except Exception as date_error:
+                        print(
+                            f"[!] Could not read banking article date "
+                            f"for {link}: {date_error}"
+                        )
+
+                if article_date is None:
                     continue
-
-                link = a_tag['href'].strip()
-
-                title = sanitize_text(
-                    a_tag.get_text(
-                        strip=True
-                    )
-                )
 
                 if (
-                    link in seen_links
-                    or len(title) < 15
-                    or any(
-                        w in title.lower()
-                        for w in (
-                            EXCLUDE_KEYWORDS
-                            + ADDA_STATIC_CATEGORY_KEYWORDS
-                        )
-                    )
+                    oldest_date_on_page is None
+                    or article_date < oldest_date_on_page
                 ):
+                    oldest_date_on_page = article_date
+
+                seen_links.add(link)
+
+                if article_date < cutoff_date:
                     continue
 
-                date_p = desc_div.find('p')
-
-                article_date = (
-                    india_now().date()
+                plain_desc, structured_data, img_url = (
+                    extract_affairscloud_rich_content(
+                        session,
+                        link,
+                        title
+                    )
                 )
 
-                if date_p:
-                    match = re.search(
-                        r'(January|February|March|April|May|June|July|August|September|October|November|December)'
-                        r'\s+\d{1,2},\s+\d{4}',
-                        date_p.get_text()
-                    )
+                rows_banking.append(
+                    {
+                        "ts": article_date,
+                        "source_name": "Banking Current Affairs",
+                        "date_label": article_date.strftime("%d %b %Y"),
+                        "title": title,
+                        "desc": plain_desc,
+                        "plain_text": plain_desc,
+                        "structured_content": structured_data,
+                        "image_url": img_url,
+                        "raw_link": link
+                    }
+                )
+                page_new_count += 1
 
-                    if match:
-                        try:
-                            article_date = datetime.strptime(
-                                match.group(0),
-                                "%B %d, %Y"
-                            ).date()
-                        except ValueError:
-                            pass
+            print(
+                f"[*] Adda247 Banking page {page}: "
+                f"{len(candidates)} candidate links, "
+                f"{page_new_count} articles within {cutoff_days} days"
+            )
 
-                if article_date >= cutoff_date:
-                    page_had_valid = True
-
-                    seen_links.add(link)
-
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
-                            session,
-                            link,
-                            title
-                        )
-                    )
-
-                    rows_banking.append(
-                        {
-                            'ts': article_date,
-                            'source_name':
-                                'Banking Current Affairs',
-                            'date_label':
-                                article_date.strftime(
-                                    "%d %b %Y"
-                                ),
-                            'title': title,
-                            'desc': plain_desc,
-                            'plain_text': plain_desc,
-                            'structured_content':
-                                structured_data,
-                            'image_url': img_url,
-                            'raw_link': link
-                        }
-                    )
-
-                else:
-                    keep_scraping = False
-
-            if not page_had_valid:
+            # The page is date-descending. Once its oldest dated item is
+            # older than the cutoff, further pages cannot add eligible rows.
+            if (
+                oldest_date_on_page is not None
+                and oldest_date_on_page < cutoff_date
+            ):
                 break
 
+            if not candidates or page_new_count == 0:
+                # Do not follow a pagination loop that returns the same
+                # page or no new article links.
+                break
+
+            target_url = _adda_next_banking_page(
+                soup,
+                page,
+                base_url
+            )
             page += 1
             time.sleep(1)
 
@@ -2495,1229 +2675,16 @@ def fetch_banking_current_affairs(
             )
             break
 
-    return rows_banking
-
-
-def draw_page_decorations(canvas, doc):
-    if doc.page > 1:
-        canvas.saveState()
-
-        canvas.setFont(
-            BOLD_FONT,
-            11
-        )
-
-        canvas.setFillColor(
-            colors.HexColor('#0066CC')
-        )
-
-        x_pos = (
-            doc.pagesize[0]
-            - doc.rightMargin
-        )
-
-        y_pos = (
-            doc.bottomMargin
-            - 10
-        )
-
-        text_str = "[index]"
-
-        canvas.drawRightString(
-            x_pos,
-            y_pos,
-            text_str
-        )
-
-        text_width = canvas.stringWidth(
-            text_str,
-            BOLD_FONT,
-            11
-        )
-
-        rect = (
-            x_pos - text_width - 4,
-            y_pos - 4,
-            x_pos + 4,
-            y_pos + 12
-        )
-
-        canvas.linkAbsolute(
-            "Index Page",
-            "table_of_contents",
-            Rect=rect,
-            Border=[0, 0, 0]
-        )
-
-        canvas.restoreState()
-
-
-# === PDF GENERATOR WITH FIXED STYLING ===
-def generate_pdf_document(
-    news_items,
-    ca_items,
-    banking_items,
-    session,
-    filepath,
-    is_desktop=False
-):
-    if is_desktop:
-        PAGE_SIZE = A4
-
-        left_m = (
-            right_m
-        ) = (
-            top_m
-        ) = (
-            bottom_m
-        ) = 0.5 * inch
-
-        max_img_width = 7.27 * inch
-        max_img_height = 4.5 * inch
-        content_width = 7.27 * inch
-
-    else:
-        PAGE_SIZE = (
-            4.2 * inch,
-            8.0 * inch
-        )
-
-        left_m = (
-            right_m
-        ) = 0.12 * inch
-
-        top_m = (
-            bottom_m
-        ) = 0.35 * inch
-
-        max_img_width = 3.96 * inch
-        max_img_height = 2.4 * inch
-        content_width = 3.96 * inch
-
-    doc = BaseDocTemplate(
-        filepath,
-        pagesize=PAGE_SIZE,
-        leftMargin=left_m,
-        rightMargin=right_m,
-        topMargin=top_m,
-        bottomMargin=bottom_m
-    )
-
-    frame = Frame(
-        doc.leftMargin,
-        doc.bottomMargin,
-        doc.width,
-        doc.height,
-        id='normal_frame'
-    )
-
-    template = PageTemplate(
-        id='pdf_template',
-        frames=frame,
-        onPage=draw_page_decorations
-    )
-
-    doc.addPageTemplates(
-        [template]
-    )
-
-    styles = getSampleStyleSheet()
-
-    title_style = ParagraphStyle(
-        'DocTitle',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=21,
-        leading=26,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#1B365D'),
-        spaceAfter=4
-    )
-
-    updated_time_style = ParagraphStyle(
-        'LastUpdatedTime',
-        parent=styles['Normal'],
-        fontName=MAIN_FONT,
-        fontSize=10.5,
-        leading=14,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#555555'),
-        spaceAfter=12
-    )
-
-    idx_main_style = ParagraphStyle(
-        'IndexTitle',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=17,
-        leading=22,
-        textColor=colors.HexColor('#1B365D'),
-        spaceBefore=4,
-        spaceAfter=8
-    )
-
-    cat_title_style = ParagraphStyle(
-        'CategoryTitle',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=21,
-        leading=26,
-        textColor=colors.HexColor('#A02020'),
-        spaceBefore=22,
-        spaceAfter=12
-    )
-
-    category_header_style = ParagraphStyle(
-        'CatHeaderStyle',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=15,
-        leading=20,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#D32F2F'),
-        spaceBefore=14,
-        spaceAfter=8
-    )
-
-    subheading_style = ParagraphStyle(
-        'SideHeading',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=15,
-        leading=21,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor('#0000FF'),
-        spaceBefore=12,
-        spaceAfter=6
-    )
-
-    key_highlights_style = ParagraphStyle(
-        'KeyHighlightsHeading',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=14.5,
-        leading=20,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor('#339966'),
-        spaceBefore=10,
-        spaceAfter=4
-    )
-
-    body_style = ParagraphStyle(
-        'ReadingBody',
-        parent=styles['Normal'],
-        fontName=MAIN_FONT,
-        fontSize=13,
-        leading=18.5,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor('#222222'),
-        spaceAfter=10
-    )
-
-    bullet_style = ParagraphStyle(
-        'ReadingBullet',
-        parent=styles['Normal'],
-        fontName=MAIN_FONT,
-        fontSize=13,
-        leading=18.5,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor('#222222'),
-        spaceAfter=6
-    )
-
-    meta_style = ParagraphStyle(
-        'ReadingMeta',
-        parent=styles['Normal'],
-        fontName=MAIN_FONT,
-        fontSize=11.5,
-        leading=15,
-        textColor=colors.HexColor('#666666'),
-        spaceAfter=10
-    )
-
-    table_header_cell_style = ParagraphStyle(
-        'THeaderCell',
-        parent=styles['Normal'],
-        fontName=BOLD_FONT,
-        fontSize=11,
-        leading=15,
-        alignment=TA_CENTER,
-        textColor=colors.white
-    )
-
-    table_body_cell_style = ParagraphStyle(
-        'TBodyCell',
-        parent=styles['Normal'],
-        fontName=MAIN_FONT,
-        fontSize=10.5,
-        leading=14.5,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor('#222222')
-    )
-
-    story = []
-
-    today_str = india_now().strftime(
-        "%d %B %Y"
-    )
-
-    story.append(
-        Paragraph(
-            f"DAILY DIGEST & ARTICLES<br/>{today_str}",
-            title_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"Last Updated: "
-            f"{india_now().strftime('%d %b %Y, %H:%M IST')}",
-            updated_time_style
-        )
-    )
-
-    story.append(
-        Spacer(
-            1,
-            4
-        )
-    )
-
-    categories = [
-        (
-            "NEWS ARTICLES",
-            news_items,
-            "NEWS",
-            "cat_news"
-        ),
-        (
-            "CURRENT AFFAIRS (CA)",
-            ca_items,
-            "CA",
-            "cat_ca"
-        ),
-        (
-            "BANKING AND RBI CURRENT AFFAIRS",
-            banking_items,
-            "BANKING",
-            "cat_banking"
-        )
-    ]
-
-    story.append(
-        Paragraph(
-            '<a name="table_of_contents"/>'
-            'TABLE OF CONTENTS / INDEX',
-            idx_main_style
-        )
-    )
-
-    for (
-        cat_title,
-        items,
-        cat_type,
-        cat_bookmark
-    ) in categories:
-
-        story.append(
-            Paragraph(
-                f'<a href="#{cat_bookmark}">'
-                f'<font color="#A02020">'
-                f'<b>■ {cat_title}</b>'
-                f'</font>'
-                f'</a>',
-                ParagraphStyle(
-                    'IdxCat',
-                    parent=styles['Normal'],
-                    fontName=BOLD_FONT,
-                    fontSize=13,
-                    leading=18,
-                    spaceBefore=8,
-                    spaceAfter=4
-                )
-            )
-        )
-
-        if not items:
-            story.append(
-                Paragraph(
-                    "No articles available "
-                    "for this section today.",
-                    ParagraphStyle(
-                        'NoArt',
-                        parent=styles['Normal'],
-                        fontName=MAIN_FONT,
-                        fontSize=11,
-                        leading=15,
-                        leftIndent=10
-                    )
-                )
-            )
-
-            continue
-
-        for idx, item in enumerate(
-            items,
-            1
-        ):
-            art_bookmark_name = (
-                f"bm_{cat_type.lower()}_{idx}"
-            )
-
-            item["doc_bookmark"] = (
-                art_bookmark_name
-            )
-
-            title_text = html.escape(
-                sanitize_text(
-                    item.get(
-                        "title",
-                        "Untitled Article"
-                    )
-                )
-            )
-
-            story.append(
-                Paragraph(
-                    f'{idx}. '
-                    f'<a href="#{art_bookmark_name}">'
-                    f'<font color="#0066CC">'
-                    f'<u>{title_text}</u>'
-                    f'</font>'
-                    f'</a>',
-                    ParagraphStyle(
-                        'IdxArt',
-                        parent=styles['Normal'],
-                        fontName=MAIN_FONT,
-                        fontSize=12,
-                        leading=17,
-                        leftIndent=10,
-                        spaceAfter=3
-                    )
-                )
-            )
-
-    story.append(
-        Spacer(
-            1,
-            12
-        )
-    )
-
-    story.append(
-        HRFlowable(
-            width="100%",
-            thickness=1,
-            color=colors.HexColor('#CCCCCC'),
-            spaceAfter=18
-        )
-    )
-
-    for (
-        cat_title,
-        items,
-        cat_type,
-        cat_bookmark
-    ) in categories:
-
-        story.append(
-            Paragraph(
-                f'<a name="{cat_bookmark}"/>'
-                f'{cat_title}',
-                cat_title_style
-            )
-        )
-
-        if not items:
-            story.append(
-                Paragraph(
-                    "No articles available "
-                    "for this section today.",
-                    ParagraphStyle(
-                        'Empty',
-                        parent=styles['Normal'],
-                        fontName=MAIN_FONT,
-                        fontSize=12,
-                        leading=16
-                    )
-                )
-            )
-
-            continue
-
-        for idx, item in enumerate(
-            items,
-            1
-        ):
-            title = html.escape(
-                sanitize_text(
-                    item.get(
-                        "title",
-                        "Untitled Article"
-                    )
-                )
-            )
-
-            url = item.get(
-                "raw_link",
-                ""
-            )
-
-            date_label = html.escape(
-                sanitize_text(
-                    item.get(
-                        "date_label",
-                        ""
-                    )
-                )
-            )
-
-            source_name = item.get(
-                "source_name",
-                "DEFAULT"
-            )
-
-            art_bookmark = item.get(
-                "doc_bookmark",
-                f"bm_{cat_type.lower()}_{idx}"
-            )
-
-            headline_hex = PDF_HEADLINE_COLORS.get(
-                source_name,
-                PDF_HEADLINE_COLORS["DEFAULT"]
-            )
-
-            art_style = ParagraphStyle(
-                f'ArtHead_{source_name}',
-                parent=styles['Normal'],
-                fontName=BOLD_FONT,
-                fontSize=15,
-                leading=20,
-                textColor=colors.HexColor(
-                    headline_hex
-                ),
-                spaceBefore=12,
-                spaceAfter=6
-            )
-
-            story.append(
-                Paragraph(
-                    f'<a name="{art_bookmark}"/>'
-                    f'{idx}. {title}',
-                    art_style
-                )
-            )
-
-            img_url = item.get(
-                "image_url"
-            )
-
-            if img_url:
-                try:
-                    img_resp = session.get(
-                        img_url,
-                        headers=HEADERS,
-                        timeout=6
-                    )
-
-                    if img_resp.status_code == 200:
-                        img_data = BytesIO(
-                            img_resp.content
-                        )
-
-                        img_flowable = Image(
-                            img_data
-                        )
-
-                        w = img_flowable.drawWidth
-                        h = img_flowable.drawHeight
-
-                        aspect = (
-                            h / float(w)
-                            if w
-                            else 0.6
-                        )
-
-                        new_w = min(
-                            w,
-                            max_img_width
-                        )
-
-                        new_h = min(
-                            new_w * aspect,
-                            max_img_height
-                        )
-
-                        img_flowable.drawWidth = new_w
-                        img_flowable.drawHeight = new_h
-                        img_flowable.hAlign = 'CENTER'
-
-                        story.append(
-                            Spacer(
-                                1,
-                                4
-                            )
-                        )
-
-                        story.append(
-                            img_flowable
-                        )
-
-                        story.append(
-                            Spacer(
-                                1,
-                                6
-                            )
-                        )
-
-                except Exception as img_err:
-                    print(
-                        f"[!] Skip image render for "
-                        f"'{title[:20]}...': "
-                        f"{img_err}"
-                    )
-
-            meta_html = (
-                f'[{date_label}] '
-                f'&nbsp;|&nbsp; '
-            )
-
-            if is_valid_url(url):
-                meta_html += clean_hyperlink_for_drive(
-                    url,
-                    "Source Article Link"
-                )
-
-            story.append(
-                Paragraph(
-                    meta_html,
-                    meta_style
-                )
-            )
-
-            if (
-                "structured_content" in item
-                and item["structured_content"]
-            ):
-
-                for block in item[
-                    "structured_content"
-                ]:
-
-                    b_type = block.get(
-                        "type"
-                    )
-
-                    b_text = block.get(
-                        "text",
-                        ""
-                    )
-
-                    if b_type == "category_header":
-                        story.append(
-                            Paragraph(
-                                b_text,
-                                category_header_style
-                            )
-                        )
-
-                    elif b_type == "subheading":
-                        story.append(
-                            Paragraph(
-                                b_text,
-                                subheading_style
-                            )
-                        )
-
-                    elif b_type == "key_highlights":
-                        story.append(
-                            Paragraph(
-                                b_text,
-                                key_highlights_style
-                            )
-                        )
-
-                    elif b_type == "paragraph":
-                        story.append(
-                            Paragraph(
-                                b_text,
-                                body_style
-                            )
-                        )
-
-                    elif b_type == "bullet_list":
-                        bullet_items = []
-
-                        for bullet in block.get(
-                            "items",
-                            []
-                        ):
-                            bullet_items.append(
-                                ListItem(
-                                    Paragraph(
-                                        bullet,
-                                        bullet_style
-                                    ),
-                                    leftIndent=12,
-                                    bulletColor=
-                                        colors.HexColor(
-                                            '#1B365D'
-                                        )
-                                )
-                            )
-
-                        story.append(
-                            ListFlowable(
-                                bullet_items,
-                                bulletType='bullet',
-                                start='square',
-                                leftIndent=10
-                            )
-                        )
-
-                        story.append(
-                            Spacer(
-                                1,
-                                4
-                            )
-                        )
-
-                    elif b_type == "table":
-                        matrix = block.get(
-                            "matrix",
-                            []
-                        )
-
-                        if matrix:
-                            table_data = []
-
-                            for row_idx, row in enumerate(
-                                matrix
-                            ):
-                                formatted_row = []
-
-                                for cell_text in row:
-                                    style_to_use = (
-                                        table_header_cell_style
-                                        if row_idx == 0
-                                        else
-                                        table_body_cell_style
-                                    )
-
-                                    formatted_row.append(
-                                        Paragraph(
-                                            cell_text,
-                                            style_to_use
-                                        )
-                                    )
-
-                                table_data.append(
-                                    formatted_row
-                                )
-
-                            num_cols = (
-                                max(
-                                    len(r)
-                                    for r in matrix
-                                )
-                                if matrix
-                                else 1
-                            )
-
-                            col_w = (
-                                content_width
-                                / float(num_cols)
-                            )
-
-                            t_flowable = Table(
-                                table_data,
-                                colWidths=[
-                                    col_w
-                                ] * num_cols
-                            )
-
-                            t_flowable.setStyle(
-                                TableStyle(
-                                    [
-                                        (
-                                            'BACKGROUND',
-                                            (0, 0),
-                                            (-1, 0),
-                                            colors.HexColor(
-                                                '#E65100'
-                                            )
-                                        ),
-                                        (
-                                            'TEXTCOLOR',
-                                            (0, 0),
-                                            (-1, 0),
-                                            colors.white
-                                        ),
-                                        (
-                                            'ALIGN',
-                                            (0, 0),
-                                            (-1, -1),
-                                            'CENTER'
-                                        ),
-                                        (
-                                            'VALIGN',
-                                            (0, 0),
-                                            (-1, -1),
-                                            'MIDDLE'
-                                        ),
-                                        (
-                                            'GRID',
-                                            (0, 0),
-                                            (-1, -1),
-                                            0.5,
-                                            colors.HexColor(
-                                                '#CCCCCC'
-                                            )
-                                        ),
-                                        (
-                                            'TOPPADDING',
-                                            (0, 0),
-                                            (-1, -1),
-                                            5
-                                        ),
-                                        (
-                                            'BOTTOMPADDING',
-                                            (0, 0),
-                                            (-1, -1),
-                                            5
-                                        ),
-                                        (
-                                            'LEFTPADDING',
-                                            (0, 0),
-                                            (-1, -1),
-                                            4
-                                        ),
-                                        (
-                                            'RIGHTPADDING',
-                                            (0, 0),
-                                            (-1, -1),
-                                            4
-                                        )
-                                    ]
-                                )
-                            )
-
-                            story.append(
-                                Spacer(
-                                    1,
-                                    6
-                                )
-                            )
-
-                            story.append(
-                                t_flowable
-                            )
-
-                            story.append(
-                                Spacer(
-                                    1,
-                                    8
-                                )
-                            )
-
-            else:
-                desc = sanitize_text(
-                    item.get(
-                        "desc",
-                        ""
-                    )
-                )
-
-                if (
-                    desc
-                    and desc != item.get(
-                        "title"
-                    )
-                ):
-                    for paragraph_text in desc.split(
-                        "\n\n"
-                    ):
-                        p_clean = html.escape(
-                            sanitize_text(
-                                paragraph_text
-                            )
-                        )
-
-                        if p_clean:
-                            story.append(
-                                Paragraph(
-                                    p_clean,
-                                    body_style
-                                )
-                            )
-
-            story.append(
-                Spacer(
-                    1,
-                    4
-                )
-            )
-
-            story.append(
-                HRFlowable(
-                    width="100%",
-                    thickness=0.6,
-                    color=colors.HexColor(
-                        '#E0E0E0'
-                    ),
-                    spaceAfter=14
-                )
-            )
-
-    doc.build(
-        story
+    rows_banking.sort(
+        key=lambda x: x["ts"],
+        reverse=True
     )
 
     print(
-        f"{COLORS['GREEN']}[+] Successfully generated "
-        f"PDF Document: {filepath}"
-        f"{COLORS['RESET']}"
+        f"[*] Adda247 Banking/RBI total: "
+        f"{len(rows_banking)} articles"
     )
-
-
-# === MAIN PIPELINE RUNNER ===
-def run_updates():
-    if not check_internet():
-        message = (
-            f"[{india_now()}] Device offline, "
-            f"skipping PDF generation and Google Drive sync."
-        )
-        print(message)
-        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-            raise RuntimeError(message)
-        return
-
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    notif_lines = []
-
-    # 1. RSS NEWS ARTICLES
-    show_status(
-        "0% - Fast Scraping RSS News Articles..."
-    )
-
-    all_news = []
-
-    for source, url in NEWS_SOURCES.items():
-        try:
-            feed = feedparser.parse(
-                url
-            )
-
-            source_count = 0
-
-            for entry in feed.entries:
-                if source_count >= 5:
-                    break
-
-                link = entry.get(
-                    'link',
-                    ''
-                ).strip()
-
-                title = sanitize_text(
-                    entry.get(
-                        'title',
-                        ''
-                    )
-                )
-
-                if (
-                    not title
-                    or not is_english_text(title)
-                    or any(
-                        w in title.lower()
-                        for w in EXCLUDE_KEYWORDS
-                    )
-                ):
-                    continue
-
-                raw_summary = (
-                    entry.get(
-                        'summary',
-                        ''
-                    )
-                    or
-                    entry.get(
-                        'description',
-                        ''
-                    )
-                )
-
-                desc = (
-                    sanitize_text(
-                        BeautifulSoup(
-                            raw_summary,
-                            'html.parser'
-                        ).get_text()
-                    )
-                    if raw_summary
-                    else title
-                )
-
-                img_url = extract_rss_image(
-                    entry
-                )
-
-                dt = (
-                    datetime(
-                        *entry.published_parsed[:6]
-                    )
-                    if entry.get(
-                        'published_parsed'
-                    )
-                    else
-                    india_now()
-                )
-
-                all_news.append(
-                    {
-                        'ts': dt,
-                        'source_name': source,
-                        'date_label':
-                            f"{source} "
-                            f"({dt.strftime('%d %b %Y')})",
-                        'title': title,
-                        'desc': desc,
-                        'image_url': img_url,
-                        'raw_link': link
-                    }
-                )
-
-                source_count += 1
-
-        except Exception as e:
-            print(
-                f"[!] Failed parsing RSS for "
-                f"{source}: {e}"
-            )
-            continue
-
-    all_news.sort(
-        key=lambda x: x['ts'],
-        reverse=True
-    )
-
-    if all_news:
-        notif_lines.append(
-            "📰 NEWS"
-        )
-
-        for item in all_news[:2]:
-            notif_lines.append(
-                f"• {item['title']}"
-            )
-
-    # 2. CURRENT AFFAIRS
-    show_status(
-        "33% - Fetching Current Affairs "
-        "(AffairsCloud and Adda247 with Tables)..."
-    )
-
-    ac_items = (
-        fetch_affairscloud_today_and_yesterday(
-            session
-        )
-    )
-
-    adda_items = (
-        fetch_adda247_previous_3_days(
-            session
-        )
-    )
-
-    rows_ca = []
-
-    for ac_item in ac_items:
-        rows_ca.append(
-            ac_item
-        )
-
-    for adda_item in adda_items:
-        if not any(
-            item['raw_link']
-            == adda_item['raw_link']
-            for item in rows_ca
-        ):
-            rows_ca.append(
-                adda_item
-            )
-
-    if rows_ca:
-        notif_lines.append(
-            "\n⚡ CURRENT AFFAIRS"
-        )
-
-        for item in rows_ca[:2]:
-            notif_lines.append(
-                f"• {item['title']}"
-            )
-
-    # 3. BANKING AND RBI CURRENT AFFAIRS
-    show_status(
-        "66% - Scraping Banking & RBI "
-        "Current Affairs (Adda247)..."
-    )
-
-    rows_banking = (
-        fetch_banking_current_affairs(
-            session,
-            cutoff_days=90
-        )
-    )
-
-    rows_banking.sort(
-        key=lambda x: x['ts'],
-        reverse=True
-    )
-
-    if rows_banking:
-        notif_lines.append(
-            "\n🏦 BANKING & RBI CA"
-        )
-
-        for item in rows_banking[:2]:
-            notif_lines.append(
-                f"• {item['title']}"
-            )
-
-    # 4. GENERATE PDFS
-    show_status(
-        "85% - Generating PDF Documents..."
-    )
-
-    if not os.path.exists(
-        DOWNLOAD_DIR
-    ):
-        os.makedirs(
-            DOWNLOAD_DIR,
-            exist_ok=True
-        )
-
-    local_pdf_path = os.path.join(
-        DOWNLOAD_DIR,
-        "Daily_Articles.pdf"
-    )
-
-    generate_pdf_document(
-        all_news,
-        rows_ca,
-        rows_banking,
-        session,
-        local_pdf_path,
-        is_desktop=False
-    )
-
-    # Keep both PDFs in the workflow output directory on GitHub Actions
-    # so they can also be downloaded as a workflow artifact.
-    temp_dir = (
-        DOWNLOAD_DIR
-        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
-        else tempfile.gettempdir()
-    )
-
-    drive_pdf_temp_path = os.path.join(
-        temp_dir,
-        "Daily_Articles_Desktop.pdf"
-    )
-
-    generate_pdf_document(
-        all_news,
-        rows_ca,
-        rows_banking,
-        session,
-        drive_pdf_temp_path,
-        is_desktop=True
-    )
-
-    # 5. UPLOAD DESKTOP PDF TO GOOGLE DRIVE & CLEANUP
-    show_status(
-        "95% - Uploading Desktop PDF to Google Drive..."
-    )
-
-    if USE_UPLOAD_BRIDGE:
-        desktop_uploaded = upload_pdf_via_apps_script(
-            drive_pdf_temp_path,
-            "Daily_Articles.pdf"
-        )
-        mobile_uploaded = upload_pdf_via_apps_script(
-            local_pdf_path,
-            "Daily_Articles_Mobile.pdf"
-        )
-        if not desktop_uploaded or not mobile_uploaded:
-            raise RuntimeError("One or more Google Drive uploads failed.")
-    else:
-        # Existing direct Drive upload remains available for local Android runs
-        # and as a GitHub OAuth fallback until the bridge is fully verified.
-        desktop_uploaded = upload_pdf_to_drive(
-            drive_pdf_temp_path,
-            DRIVE_FOLDER_ID,
-            creds,
-            target_name="Daily_Articles.pdf"
-        )
-
-        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-            if not desktop_uploaded:
-                raise RuntimeError("Desktop PDF upload to Google Drive failed.")
-
-            mobile_folder_id = get_or_create_drive_subfolder(
-                DRIVE_FOLDER_ID,
-                MOBILE_DRIVE_FOLDER_NAME,
-                creds
-            )
-
-            mobile_uploaded = upload_pdf_to_drive(
-                local_pdf_path,
-                mobile_folder_id,
-                creds,
-                target_name="Daily_Articles_Mobile.pdf"
-            )
-
-            if not mobile_uploaded:
-                raise RuntimeError("Mobile PDF upload to Google Drive failed.")
-
-    if (
-        os.path.exists(drive_pdf_temp_path)
-        and os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
-    ):
-        os.remove(
-            drive_pdf_temp_path
-        )
-
-    show_status(
-        "100% - Processing Complete!"
-    )
-
-    # 6. TRIGGER TERMUX NOTIFICATION (local Android runs only)
-    if (
-        notif_lines
-        and os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
-    ):
-        summary_metrics = [
-            f"📊 Articles -> News: "
-            f"{len(all_news)} | "
-            f"CA: {len(rows_ca)} | "
-            f"Banking: {len(rows_banking)}",
-
-            "\n✨ RECENT HEADLINES:"
-        ]
-
-        summary_metrics.extend(
-            notif_lines
-        )
-
-        send_notify(
-            "News Engine: PDF Generated & Uploaded to Drive",
-            "\n".join(
-                summary_metrics
-            )
-        )
+    return rows_banking
 
 
 if __name__ == "__main__":

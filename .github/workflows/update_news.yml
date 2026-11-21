@@ -23,6 +23,8 @@ jobs:
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
       GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
       GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+      GOOGLE_APPS_SCRIPT_URL: ${{ secrets.GOOGLE_APPS_SCRIPT_URL }}
+      GOOGLE_APPS_SCRIPT_SECRET: ${{ secrets.GOOGLE_APPS_SCRIPT_SECRET }}
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
       MOBILE_DRIVE_FOLDER_NAME: Mobile
 
@@ -42,21 +44,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Validate Google OAuth secrets
+      - name: Validate upload configuration
         shell: bash
         run: |
-          for name in GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GOOGLE_OAUTH_REFRESH_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Add the $name repository secret before running this workflow."
-              exit 1
-            fi
-          done
-          echo "All required Google OAuth secrets are present."
+          if [ -n "$GOOGLE_APPS_SCRIPT_URL" ] && [ -n "$GOOGLE_APPS_SCRIPT_SECRET" ]; then
+            echo "Google Apps Script upload bridge is configured."
+          elif [ -n "$GOOGLE_OAUTH_CLIENT_ID" ] && [ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ] && [ -n "$GOOGLE_OAUTH_REFRESH_TOKEN" ]; then
+            echo "Apps Script bridge is not configured; using the existing OAuth fallback."
+          else
+            echo "::error::Configure both GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET, or all three existing Google OAuth secrets."
+            exit 1
+          fi
 
       - name: Check Python syntax
         run: python -m py_compile News_CA_Updater.py
 
-      - name: Generate PDFs and upload both versions to Google Drive
+      - name: Generate PDFs and upload both versions to Google Drive (Apps Script bridge or OAuth fallback)
         run: python News_CA_Updater.py
 
       - name: Verify generated PDFs

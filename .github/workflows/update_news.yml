@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     env:
       TZ: Asia/Kolkata
-      NEWS_CA_OUTPUT_DIR: ${{ runner.temp }}/news-ca-output
+      NEWS_CA_OUTPUT_DIR: ${{ github.workspace }}/news-ca-output
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
       MOBILE_DRIVE_FOLDER_NAME: Mobile
@@ -75,7 +75,7 @@ jobs:
         with:
           name: News-and-Current-Affairs-PDFs
           path: |
-            ${{ runner.temp }}/news-ca-output/Daily_Articles.pdf
-            ${{ runner.temp }}/news-ca-output/Daily_Articles_Desktop.pdf
+            ${{ github.workspace }}/news-ca-output/Daily_Articles.pdf
+            ${{ github.workspace }}/news-ca-output/Daily_Articles_Desktop.pdf
           if-no-files-found: error
           retention-days: 7

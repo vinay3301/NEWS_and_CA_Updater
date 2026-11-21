@@ -2291,6 +2291,8 @@ def fetch_adda247_previous_3_days(session):
                 timeout=10
             )
 
+            print(f"[Adda247 CA] HTTP {resp.status_code}: {url_ca}")
+
             if resp.status_code != 200:
                 continue
 
@@ -2427,6 +2429,8 @@ def fetch_adda247_previous_3_days(session):
         reverse=True
     )
 
+    print(f"[Adda247 CA] Articles extracted: {len(rows_adda)}")
+
     return rows_adda
 
 
@@ -2471,6 +2475,8 @@ def fetch_banking_current_affairs(
                 timeout=12
             )
 
+            print(f"[Adda247 Banking] Page {page} HTTP {resp.status_code}: {target_url}")
+
             if resp.status_code != 200:
                 break
 
@@ -2485,9 +2491,11 @@ def fetch_banking_current_affairs(
             )
 
             if not container:
+                print(f"[Adda247 Banking] Page {page}: expected ul.lcp_catlist not found")
                 break
 
             items = container.find_all('li')
+            print(f"[Adda247 Banking] Page {page}: {len(items)} listing items found")
 
             if not items:
                 break
@@ -2602,6 +2610,7 @@ def fetch_banking_current_affairs(
             )
             break
 
+    print(f"[Adda247 Banking] Articles extracted: {len(rows_banking)}")
     return rows_banking
 
 

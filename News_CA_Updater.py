@@ -1965,7 +1965,7 @@ def fetch_affairscloud_today_and_yesterday(session):
 
     ac_articles = []
 
-    today_dt = datetime.now()
+    today_dt = india_now()
     yesterday_dt = today_dt - timedelta(days=1)
 
     dates_to_fetch = [
@@ -2111,7 +2111,7 @@ def fetch_adda247_previous_3_days(session):
     )
 
     cutoff_date_ca = (
-        datetime.now() - timedelta(days=3)
+        india_now() - timedelta(days=3)
     ).date()
 
     ca_target_urls = [
@@ -2203,7 +2203,7 @@ def fetch_adda247_previous_3_days(session):
                     )
                     if date_tag
                     else
-                    datetime.now().strftime(
+                    india_now().strftime(
                         "%B %d, %Y"
                     )
                 )
@@ -2222,12 +2222,12 @@ def fetch_adda247_previous_3_days(session):
                         ).date()
                         if match
                         else
-                        datetime.now().date()
+                        india_now().date()
                     )
 
                 except Exception:
                     article_date = (
-                        datetime.now().date()
+                        india_now().date()
                     )
 
                 if article_date >= cutoff_date_ca:
@@ -2281,7 +2281,7 @@ def fetch_banking_current_affairs(
     )
 
     cutoff_date = (
-        datetime.now()
+        india_now()
         - timedelta(days=cutoff_days)
     ).date()
 
@@ -2377,7 +2377,7 @@ def fetch_banking_current_affairs(
                 date_p = desc_div.find('p')
 
                 article_date = (
-                    datetime.now().date()
+                    india_now().date()
                 )
 
                 if date_p:
@@ -3422,7 +3422,7 @@ def run_updates():
                         'published_parsed'
                     )
                     else
-                    datetime.now()
+                    india_now()
                 )
 
                 all_news.append(

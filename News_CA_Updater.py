@@ -396,11 +396,23 @@ SCOPE = ["https://www.googleapis.com/auth/drive"]
 
 # GitHub Actions should use the user's Google account via OAuth refresh token.
 # This avoids the storage-quota limitation of service accounts when creating files.
+UPLOAD_BRIDGE_URL = os.environ.get("GOOGLE_APPS_SCRIPT_URL", "").strip()
+UPLOAD_BRIDGE_SECRET = os.environ.get("GOOGLE_APPS_SCRIPT_SECRET", "").strip()
+USE_UPLOAD_BRIDGE = (
+    os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    and bool(UPLOAD_BRIDGE_URL)
+    and bool(UPLOAD_BRIDGE_SECRET)
+)
+
 _oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 _oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 _oauth_refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
 
-if _oauth_client_id and _oauth_client_secret and _oauth_refresh_token:
+if USE_UPLOAD_BRIDGE:
+    # GitHub Actions uploads PDFs through the owner-authorized Apps Script bridge.
+    # Existing OAuth secrets remain configured as a fallback until migration is verified.
+    creds = None
+elif _oauth_client_id and _oauth_client_secret and _oauth_refresh_token:
     creds = GoogleOAuthCredentials(
         token=None,
         refresh_token=_oauth_refresh_token,
@@ -411,9 +423,8 @@ if _oauth_client_id and _oauth_client_secret and _oauth_refresh_token:
     )
 elif os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
     raise RuntimeError(
-        "Google OAuth secrets are missing. Configure "
-        "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and "
-        "GOOGLE_OAUTH_REFRESH_TOKEN in GitHub Actions repository secrets."
+        "Configure GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET, "
+        "or provide the existing Google OAuth secrets as a fallback."
     )
 else:
     # Preserve existing Android/Pydroid service-account authentication locally.
@@ -422,6 +433,50 @@ else:
             "Google service-account JSON was not found at the configured local path."
         )
     creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, SCOPE)
+
+
+def upload_pdf_via_apps_script(file_path, file_name):
+    """Upload one PDF to the authenticated Google Apps Script Drive bridge."""
+    if not UPLOAD_BRIDGE_URL or not UPLOAD_BRIDGE_SECRET:
+        raise RuntimeError("Google Apps Script upload bridge settings are missing.")
+
+    import base64
+
+    with open(file_path, "rb") as pdf_file:
+        encoded_pdf = base64.b64encode(pdf_file.read()).decode("ascii")
+
+    response = requests.post(
+        UPLOAD_BRIDGE_URL,
+        json={
+            "secret": UPLOAD_BRIDGE_SECRET,
+            "fileName": file_name,
+            "base64": encoded_pdf
+        },
+        headers={"Content-Type": "application/json"},
+        timeout=(30, 300)
+    )
+    response.raise_for_status()
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Apps Script returned a non-JSON response. Check that the Web App "
+            "deployment URL ends in /exec and is accessible."
+        ) from exc
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"Apps Script upload failed for {file_name}: "
+            f"{result.get('error', 'Unknown error')}"
+        )
+
+    print(
+        f"{COLORS['GREEN']}[+] Apps Script {result.get('action')} "
+        f"{file_name} in Google Drive (ID: {result.get('fileId')}, "
+        f"size: {result.get('size')} bytes){COLORS['RESET']}"
+    )
+    return True
 
 
 def get_or_create_drive_subfolder(
@@ -3586,34 +3641,46 @@ def run_updates():
         "95% - Uploading Desktop PDF to Google Drive..."
     )
 
-    desktop_uploaded = upload_pdf_to_drive(
-        drive_pdf_temp_path,
-        DRIVE_FOLDER_ID,
-        creds,
-        target_name="Daily_Articles.pdf"
-    )
-
-    # GitHub also publishes the mobile layout in a dedicated Drive subfolder.
-    # FolderSync/other Android sync apps can then sync only this folder.
-    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-        if not desktop_uploaded:
-            raise RuntimeError("Desktop PDF upload to Google Drive failed.")
-
-        mobile_folder_id = get_or_create_drive_subfolder(
-            DRIVE_FOLDER_ID,
-            MOBILE_DRIVE_FOLDER_NAME,
-            creds
+    if USE_UPLOAD_BRIDGE:
+        desktop_uploaded = upload_pdf_via_apps_script(
+            drive_pdf_temp_path,
+            "Daily_Articles.pdf"
         )
-
-        mobile_uploaded = upload_pdf_to_drive(
+        mobile_uploaded = upload_pdf_via_apps_script(
             local_pdf_path,
-            mobile_folder_id,
+            "Daily_Articles_Mobile.pdf"
+        )
+        if not desktop_uploaded or not mobile_uploaded:
+            raise RuntimeError("One or more Google Drive uploads failed.")
+    else:
+        # Existing direct Drive upload remains available for local Android runs
+        # and as a GitHub OAuth fallback until the bridge is fully verified.
+        desktop_uploaded = upload_pdf_to_drive(
+            drive_pdf_temp_path,
+            DRIVE_FOLDER_ID,
             creds,
-            target_name="Daily_Articles_Mobile.pdf"
+            target_name="Daily_Articles.pdf"
         )
 
-        if not mobile_uploaded:
-            raise RuntimeError("Mobile PDF upload to Google Drive failed.")
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            if not desktop_uploaded:
+                raise RuntimeError("Desktop PDF upload to Google Drive failed.")
+
+            mobile_folder_id = get_or_create_drive_subfolder(
+                DRIVE_FOLDER_ID,
+                MOBILE_DRIVE_FOLDER_NAME,
+                creds
+            )
+
+            mobile_uploaded = upload_pdf_to_drive(
+                local_pdf_path,
+                mobile_folder_id,
+                creds,
+                target_name="Daily_Articles_Mobile.pdf"
+            )
+
+            if not mobile_uploaded:
+                raise RuntimeError("Mobile PDF upload to Google Drive failed.")
 
     if (
         os.path.exists(drive_pdf_temp_path)

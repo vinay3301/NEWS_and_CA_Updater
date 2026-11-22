@@ -1,0 +1,44 @@
+name: Immediate Workflow Email Notification
+
+on:
+  workflow_run:
+    workflows:
+      - "Scheduled and Manual Production News CA PDF Update"
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send completion notification to Google Apps Script
+        env:
+          WEBHOOK_URL: ${{ secrets.NOTIFICATION_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.NOTIFICATION_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WEBHOOK_URL}" ] || [ -z "${WEBHOOK_SECRET}" ]; then
+            echo "::error::Notification webhook URL or secret is missing."
+            exit 1
+          fi
+
+          RUN_JSON="$(jq -c '.workflow_run' "$GITHUB_EVENT_PATH")"
+          PAYLOAD="$(jq -n \
+            --arg secret "$WEBHOOK_SECRET" \
+            --argjson workflow_run "$RUN_JSON" \
+            '{secret: $secret, workflow_run: $workflow_run}')"
+
+          RESPONSE="$(curl --silent --show-error --fail-with-body --location \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "$WEBHOOK_URL")"
+
+          echo "$RESPONSE"
+          echo "$RESPONSE" | jq -e '.ok == true' > /dev/null

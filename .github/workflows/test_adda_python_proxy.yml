@@ -2,6 +2,9 @@ name: Test Production Adda247 Scraper Through Apps Script Proxy
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/test_adda_python_proxy.yml"
 
 jobs:
   test-python-integration:
@@ -127,24 +130,22 @@ jobs:
           # Keep the real article HTML parser, but cap full article downloads
           # to five pages so this diagnostic run does not exhaust UrlFetch quota.
           original_extractor = scraper.extract_affairscloud_rich_content
-          article_parse_count = 0
-          successful_content_parses = 0
+          parse_counts = {"article_parse_count": 0, "successful_content_parses": 0}
 
           def capped_real_extractor(session, url, headline):
-              nonlocal article_parse_count, successful_content_parses
-              if article_parse_count >= 5:
+              if parse_counts["article_parse_count"] >= 5:
                   return (
                       headline,
                       [{"type": "paragraph", "text": headline}],
                       None,
                   )
 
-              article_parse_count += 1
+              parse_counts["article_parse_count"] += 1
               plain_text, structured, image_url = original_extractor(
                   session, url, headline
               )
               if plain_text and len(plain_text.strip()) > len(headline.strip()) + 20:
-                  successful_content_parses += 1
+                  parse_counts["successful_content_parses"] += 1
               print(
                   "PRODUCTION ARTICLE PARSER:",
                   "content chars =", len(plain_text or ""),
@@ -170,8 +171,8 @@ jobs:
           print("Listing requests:", proxy_session.listing_requests)
           print("Article requests attempted:", proxy_session.article_requests)
           print("Article pages fetched successfully:", proxy_session.article_successes)
-          print("Real production article parses attempted:", article_parse_count)
-          print("Real production article parses with substantive content:", successful_content_parses)
+          print("Real production article parses attempted:", parse_counts["article_parse_count"])
+          print("Real production article parses with substantive content:", parse_counts["successful_content_parses"])
           print("Proxy requests that exhausted retries:", proxy_session.failed_requests)
 
           for label, rows in (("Recent CA", ca_rows), ("Banking", banking_rows)):
@@ -186,7 +187,7 @@ jobs:
               raise SystemExit("FAIL: production banking scraper returned zero rows.")
           if proxy_session.article_successes == 0:
               raise SystemExit("FAIL: no individual article HTML was fetched through the proxy.")
-          if successful_content_parses == 0:
+          if parse_counts["successful_content_parses"] == 0:
               raise SystemExit("FAIL: production article parser did not extract substantive article content.")
 
           print("PASS: both production Adda247 listing functions and the real article parser worked through Apps Script.")

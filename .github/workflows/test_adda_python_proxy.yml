@@ -81,6 +81,10 @@ jobs:
           PY
 
       - name: Test PDF upload timeout and retry handling without contacting Drive
+        env:
+          GITHUB_ACTIONS: "true"
+          GOOGLE_APPS_SCRIPT_URL: "https://test.invalid/"
+          GOOGLE_APPS_SCRIPT_SECRET: "test-only-not-used"
         run: |
           python - <<'PY'
           import tempfile

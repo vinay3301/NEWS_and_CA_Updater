@@ -2093,6 +2093,99 @@ def extract_affairscloud_rich_content(
         )
 
 
+def extract_adda247_article_content(session, url, headline):
+    """
+    Extract one Adda247 article and explicitly report whether substantive
+    article content was obtained. Keep the existing parser and PDF blocks.
+    """
+    plain_text, structured_blocks, image_url = (
+        extract_affairscloud_rich_content(session, url, headline)
+    )
+
+    normalized_text = re.sub(r"\\s+", " ", (plain_text or "")).strip().casefold()
+    normalized_headline = re.sub(r"\\s+", " ", (headline or "")).strip().casefold()
+    content_ok = (
+        bool(normalized_text)
+        and normalized_text != normalized_headline
+        and len(normalized_text) > len(normalized_headline) + 20
+    )
+
+    return plain_text, structured_blocks, image_url, content_ok
+
+
+def retry_incomplete_adda247_articles(rows, session):
+    """
+    Retry headline-only Adda247 rows after the initial listing passes.
+    Updates existing rows in place and returns the rows still incomplete.
+    """
+    is_github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    if not is_github_actions:
+        return []
+
+    incomplete_by_url = {}
+    for row in rows:
+        if not row.get("content_extracted", True):
+            incomplete_by_url.setdefault(row.get("raw_link"), row)
+
+    incomplete_by_url.pop(None, None)
+    if not incomplete_by_url:
+        print("[Adda247] Content verification: all article pages extracted.")
+        return []
+
+    print(
+        f"[Adda247] Second-pass recovery: retrying "
+        f"{len(incomplete_by_url)} incomplete article(s)."
+    )
+
+    still_incomplete = []
+    for url, row in incomplete_by_url.items():
+        recovered = False
+        for retry_number, wait_seconds in enumerate((5, 15), start=1):
+            print(
+                f"[Adda247] Recovery retry {retry_number}/2: "
+                f"{row.get('title', url)}"
+            )
+            time.sleep(wait_seconds)
+
+            try:
+                plain_text, structured_blocks, image_url, content_ok = (
+                    extract_adda247_article_content(
+                        session, url, row.get("title", "")
+                    )
+                )
+                if content_ok:
+                    row["desc"] = plain_text
+                    row["plain_text"] = plain_text
+                    row["structured_content"] = structured_blocks
+                    row["image_url"] = image_url
+                    row["content_extracted"] = True
+                    recovered = True
+                    print(f"[Adda247] RECOVERED: {row.get('title', url)}")
+                    break
+            except Exception as exc:
+                print(
+                    f"[Adda247] Recovery retry {retry_number}/2 failed "
+                    f"for {url}: {type(exc).__name__}: {exc}"
+                )
+
+        if not recovered:
+            row["content_extracted"] = False
+            still_incomplete.append(row)
+
+    print(
+        f"[Adda247] Content verification: "
+        f"{len(incomplete_by_url) - len(still_incomplete)} recovered; "
+        f"{len(still_incomplete)} still incomplete."
+    )
+    for row in still_incomplete:
+        print(
+            f"[Adda247] INCOMPLETE ARTICLE: {row.get('title', '')} | "
+            f"{row.get('raw_link', '')}"
+        )
+
+    return still_incomplete
+
+
 # === CURRENT AFFAIRS FETCHERS ===
 
 def fetch_affairscloud_today_and_yesterday(session):
@@ -2477,8 +2570,8 @@ def fetch_adda247_previous_3_days(session):
                     )
 
                 if article_date >= cutoff_date_ca:
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
+                    plain_desc, structured_data, img_url, content_extracted = (
+                        extract_adda247_article_content(
                             session,
                             link,
                             title
@@ -2500,7 +2593,8 @@ def fetch_adda247_previous_3_days(session):
                             'structured_content':
                                 structured_data,
                             'image_url': img_url,
-                            'raw_link': link
+                            'raw_link': link,
+                            'content_extracted': content_extracted
                         }
                     )
 
@@ -2653,8 +2747,8 @@ def fetch_banking_current_affairs(
 
                     seen_links.add(link)
 
-                    plain_desc, structured_data, img_url = (
-                        extract_affairscloud_rich_content(
+                    plain_desc, structured_data, img_url, content_extracted = (
+                        extract_adda247_article_content(
                             session,
                             link,
                             title
@@ -2676,7 +2770,8 @@ def fetch_banking_current_affairs(
                             'structured_content':
                                 structured_data,
                             'image_url': img_url,
-                            'raw_link': link
+                            'raw_link': link,
+                            'content_extracted': content_extracted
                         }
                     )
 
@@ -3792,6 +3887,34 @@ def run_updates():
         key=lambda x: x['ts'],
         reverse=True
     )
+
+    # Retry incomplete Adda247 article pages once the first pass across both
+    # current-affairs sections is complete. Never replace Drive PDFs with
+    # headline-only Adda247 entries from GitHub Actions.
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        adda_rows_for_validation = []
+        seen_adda_urls = set()
+        for row in rows_ca + rows_banking:
+            if (
+                row.get("source_name") in ("Adda247", "Banking Current Affairs")
+                and row.get("raw_link")
+                and row["raw_link"] not in seen_adda_urls
+            ):
+                seen_adda_urls.add(row["raw_link"])
+                adda_rows_for_validation.append(row)
+
+        incomplete_adda_rows = retry_incomplete_adda247_articles(
+            adda_rows_for_validation,
+            adda_session
+        )
+        if incomplete_adda_rows:
+            raise RuntimeError(
+                f"Aborting before PDF generation and Google Drive upload: "
+                f"{len(incomplete_adda_rows)} Adda247 article(s) still have "
+                f"headline-only content after recovery retries. Existing "
+                f"Google Drive PDFs were not changed. See INCOMPLETE ARTICLE "
+                f"entries above."
+            )
 
     if rows_banking:
         notif_lines.append(

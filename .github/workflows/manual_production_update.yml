@@ -1,6 +1,10 @@
-name: Manual Production News CA PDF Update
+name: Scheduled and Manual Production News CA PDF Update
 
 on:
+  # GitHub cron uses UTC. Every 4 hours, around the clock.
+  schedule:
+    - cron: "0 */4 * * *"
+
   workflow_dispatch:
     inputs:
       confirm_drive_upload:
@@ -21,7 +25,9 @@ concurrency:
 
 jobs:
   production-update:
-    if: ${{ inputs.confirm_drive_upload == 'yes' }}
+    # Scheduled runs are authorized for automatic uploads. Manual runs still
+    # require the explicit yes confirmation.
+    if: ${{ github.event_name == 'schedule' || inputs.confirm_drive_upload == 'yes' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
 

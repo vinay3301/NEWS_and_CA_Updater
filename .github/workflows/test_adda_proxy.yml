@@ -157,12 +157,25 @@ jobs:
               failures.append("individual-article-url-discovery")
           else:
               print("Selected article URL:", article_url)
-              print("Testing individual article fetch...")
-              try:
-                  article_html = fetch_through_proxy({"url": article_url}, "individual article")
-                  print("PASS: individual article")
-              except Exception as error:
-                  print("ERROR:", str(error))
+              print("Testing individual article fetch with up to 3 attempts...")
+              article_succeeded = False
+              for attempt in (1, 2, 3):
+                  try:
+                      if attempt > 1:
+                          import time
+                          print("Waiting 5 seconds before article retry", attempt, "...")
+                          time.sleep(5)
+                      article_html = fetch_through_proxy(
+                          {"url": article_url},
+                          "individual article"
+                      )
+                      print("PASS: individual article (attempt", attempt, ")")
+                      article_succeeded = True
+                      break
+                  except Exception as error:
+                      print("Article attempt", attempt, "ERROR:", str(error))
+
+              if not article_succeeded:
                   failures.append("individual-article")
 
           print("\\n" + "=" * 55)

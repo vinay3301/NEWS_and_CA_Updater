@@ -47,6 +47,20 @@ jobs:
           proxy_url = os.environ.get("ADDA247_PROXY_URL", "").strip()
           proxy_secret = os.environ.get("ADDA247_PROXY_SECRET", "")
 
+          # First verify the production proxy adapter itself, not a test copy.
+          production_session = scraper.Adda247ProxySession(requests.Session())
+          listing_response = production_session.get(
+              "https://currentaffairs.adda247.com/"
+          )
+          if listing_response.status_code != 200 or len(listing_response.text) < 10000:
+              raise SystemExit("FAIL: production Adda247 proxy adapter could not fetch the homepage.")
+          print(
+              "PRODUCTION ADAPTER SMOKE TEST: homepage HTTP",
+              listing_response.status_code,
+              "HTML chars",
+              len(listing_response.text),
+          )
+
           if not proxy_url or not proxy_secret:
               raise SystemExit("Missing Adda247 proxy GitHub secrets.")
 

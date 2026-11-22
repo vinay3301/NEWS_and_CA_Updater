@@ -27,7 +27,7 @@ jobs:
           session = requests.Session()
           session.headers.update({"Content-Type": "application/json"})
           failures = []
-          latest_html = ""
+          page_html = {}
 
           def fetch_through_proxy(payload, label):
               response = session.post(
@@ -52,40 +52,66 @@ jobs:
           for page in ["homepage", "latest", "banking"]:
               print("\\n" + "=" * 55)
               print("Testing page:", page)
-              try:
-                  html = fetch_through_proxy({"page": page}, page)
-                  print("PASS:", page)
-                  if page == "latest":
-                      latest_html = html
-              except Exception as error:
-                  print("ERROR:", str(error))
+              succeeded = False
+
+              for attempt in (1, 2):
+                  try:
+                      if attempt == 2:
+                          print("Retrying", page, "once after the first unsuccessful response...")
+                      html = fetch_through_proxy({"page": page}, page)
+                      page_html[page] = html
+                      print("PASS:", page, "(attempt", attempt, ")")
+                      succeeded = True
+                      break
+                  except Exception as error:
+                      print("Attempt", attempt, "ERROR:", str(error))
+
+              if not succeeded:
                   failures.append(page)
 
           print("\\n" + "=" * 55)
-          print("Finding an individual article URL in the latest-posts HTML...")
+          print("Finding an individual article URL...")
           article_url = None
-          if latest_html:
-              links = re.findall(r"""href\s*=\s*["']([^"']+)["']""", latest_html, flags=re.IGNORECASE)
+
+          # Prefer latest-posts HTML; use homepage HTML if latest-posts was unavailable.
+          for source_page in ("latest", "homepage", "banking"):
+              source_html = page_html.get(source_page, "")
+              if not source_html:
+                  continue
+
+              base_url = {
+                  "latest": "https://currentaffairs.adda247.com/latest-posts/",
+                  "homepage": "https://currentaffairs.adda247.com/",
+                  "banking": "https://currentaffairs.adda247.com/banking-current-affairs/",
+              }[source_page]
+
+              links = re.findall(r"""href\s*=\s*["']([^"']+)["']""", source_html, flags=re.IGNORECASE)
               excluded = (
                   "/latest-posts", "/banking-current-affairs", "/category/",
-                  "/tag/", "/author/", "/wp-content/", "/wp-json/"
+                  "/tag/", "/author/", "/wp-content/", "/wp-json/", "/page/"
               )
+
               for link in links:
-                  candidate = urljoin("https://currentaffairs.adda247.com/latest-posts/", link)
+                  candidate = urljoin(base_url, link)
                   parsed = urlparse(candidate)
                   if parsed.scheme != "https" or parsed.hostname not in (
                       "currentaffairs.adda247.com", "www.currentaffairs.adda247.com"
                   ):
                       continue
-                  if not parsed.path.strip("/") or any(x in parsed.path.lower() for x in excluded):
+                  path = parsed.path.lower()
+                  if not path.strip("/") or any(item in path for item in excluded):
                       continue
-                  if parsed.path.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".pdf", ".css", ".js")):
+                  if path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf", ".css", ".js", ".xml")):
                       continue
                   article_url = candidate.split("#", 1)[0]
+                  print("Found candidate using", source_page, "HTML.")
+                  break
+
+              if article_url:
                   break
 
           if not article_url:
-              print("ERROR: Could not identify an individual Adda247 article URL.")
+              print("ERROR: Could not identify an individual Adda247 article URL from the available listing pages.")
               failures.append("individual-article-url-discovery")
           else:
               print("Selected article URL:", article_url)

@@ -7,13 +7,15 @@ jobs:
   test-proxy:
     runs-on: ubuntu-latest
     steps:
-      - name: Test all three Adda247 page relays
+      - name: Test listing pages and one individual article
         env:
           ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}
           ADDA247_PROXY_SECRET: ${{ secrets.ADDA247_PROXY_SECRET }}
         run: |
           python - <<'PY'
           import os
+          import re
+          from urllib.parse import urljoin, urlparse
           import requests
 
           proxy_url = os.environ.get("ADDA247_PROXY_URL", "").strip()
@@ -22,46 +24,83 @@ jobs:
           if not proxy_url or not proxy_secret:
               raise SystemExit("Missing ADDA247_PROXY_URL or ADDA247_PROXY_SECRET GitHub secret.")
 
-          pages = ["homepage", "latest", "banking"]
+          session = requests.Session()
+          session.headers.update({"Content-Type": "application/json"})
           failures = []
+          latest_html = ""
 
-          for page in pages:
+          def fetch_through_proxy(payload, label):
+              response = session.post(
+                  proxy_url,
+                  json={"secret": proxy_secret, **payload},
+                  timeout=(30, 180)
+              )
+              print("Proxy HTTP status:", response.status_code)
+              response.raise_for_status()
+              result = response.json()
+              html = result.get("html", "")
+              status = result.get("status")
+              print("Apps Script fetch status:", status)
+              print("HTML length reported by Apps Script:", result.get("htmlLength"))
+              print("HTML received by GitHub:", len(html))
+              print("HTML detected:", "<html" in html[:1000].lower() or "<!doctype" in html[:1000].lower())
+
+              if not result.get("ok") or status != 200 or len(html) < 10000:
+                  raise RuntimeError(result.get("error", f"{label} fetch failed or HTML unexpectedly short"))
+              return html
+
+          for page in ["homepage", "latest", "banking"]:
               print("\\n" + "=" * 55)
               print("Testing page:", page)
-
               try:
-                  response = requests.post(
-                      proxy_url,
-                      json={"secret": proxy_secret, "page": page},
-                      headers={"Content-Type": "application/json"},
-                      timeout=(30, 180)
-                  )
-                  print("Proxy HTTP status:", response.status_code)
-                  response.raise_for_status()
-                  result = response.json()
-
-                  html = result.get("html", "")
-                  status = result.get("status")
-
-                  print("Apps Script fetch status:", status)
-                  print("HTML length reported by Apps Script:", result.get("htmlLength"))
-                  print("HTML received by GitHub:", len(html))
-                  print("HTML detected:", "<html" in html[:1000].lower() or "<!doctype" in html[:1000].lower())
-
-                  if not result.get("ok") or status != 200 or len(html) < 10000:
-                      print("ERROR:", result.get("error", "Fetch failed or HTML unexpectedly short"))
-                      failures.append(page)
-                  else:
-                      print("PASS:", page)
-
+                  html = fetch_through_proxy({"page": page}, page)
+                  print("PASS:", page)
+                  if page == "latest":
+                      latest_html = html
               except Exception as error:
                   print("ERROR:", str(error))
                   failures.append(page)
 
           print("\\n" + "=" * 55)
+          print("Finding an individual article URL in the latest-posts HTML...")
+          article_url = None
+          if latest_html:
+              links = re.findall(r"""href\\s*=\\s*["']([^"']+)["']""", latest_html, flags=re.IGNORECASE)
+              excluded = (
+                  "/latest-posts", "/banking-current-affairs", "/category/",
+                  "/tag/", "/author/", "/wp-content/", "/wp-json/"
+              )
+              for link in links:
+                  candidate = urljoin("https://currentaffairs.adda247.com/latest-posts/", link)
+                  parsed = urlparse(candidate)
+                  if parsed.scheme != "https" or parsed.hostname not in (
+                      "currentaffairs.adda247.com", "www.currentaffairs.adda247.com"
+                  ):
+                      continue
+                  if not parsed.path.strip("/") or any(x in parsed.path.lower() for x in excluded):
+                      continue
+                  if parsed.path.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".pdf", ".css", ".js")):
+                      continue
+                  article_url = candidate.split("#", 1)[0]
+                  break
+
+          if not article_url:
+              print("ERROR: Could not identify an individual Adda247 article URL.")
+              failures.append("individual-article-url-discovery")
+          else:
+              print("Selected article URL:", article_url)
+              print("Testing individual article fetch...")
+              try:
+                  article_html = fetch_through_proxy({"url": article_url}, "individual article")
+                  print("PASS: individual article")
+              except Exception as error:
+                  print("ERROR:", str(error))
+                  failures.append("individual-article")
+
+          print("\\n" + "=" * 55)
           if failures:
-              print("FAILED PAGES:", ", ".join(failures))
+              print("FAILED TESTS:", ", ".join(failures))
               raise SystemExit(1)
 
-          print("SUCCESS: All three Adda247 pages were relayed to GitHub.")
+          print("SUCCESS: All three listing pages and one individual article were relayed to GitHub.")
           PY

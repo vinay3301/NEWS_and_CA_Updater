@@ -34,6 +34,14 @@ jobs:
           from urllib.parse import urlparse
 
           import requests
+
+          # The production module validates upload credentials during import.
+          # Supply inert test-only placeholders; this test never calls run_updates()
+          # or any Drive upload function.
+          os.environ["GITHUB_ACTIONS"] = "true"
+          os.environ["GOOGLE_APPS_SCRIPT_URL"] = "https://test.invalid/"
+          os.environ["GOOGLE_APPS_SCRIPT_SECRET"] = "test-only-not-used"
+
           import News_CA_Updater as scraper
 
           proxy_url = os.environ.get("ADDA247_PROXY_URL", "").strip()

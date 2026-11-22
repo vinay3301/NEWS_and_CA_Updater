@@ -262,9 +262,7 @@ The optional `setupScheduler()` function installs both an Apps Script dispatcher
 ├── .github/
 │   └── workflows/
 │       ├── manual_production_update.yml
-│       ├── notify_workflow_completion.yml
-│       ├── test_adda_proxy.yml
-│       └── test_adda_python_proxy.yml
+│       └── notify_workflow_completion.yml
 ├── GoogleAppsScript/
 │   ├── Code.gs
 │   └── Scheduler.gs
@@ -279,8 +277,6 @@ The optional `setupScheduler()` function installs both an Apps Script dispatcher
 | `News_CA_Updater.py` | Main production scraper, extractor, PDF generator, and upload client |
 | `requirements.txt` | Python dependencies |
 | `.github/workflows/manual_production_update.yml` | Scheduled and manually approved production workflow |\n| `.github/workflows/notify_workflow_completion.yml` | Sends an immediate completion webhook for production workflow success or failure |
-| `.github/workflows/test_adda_proxy.yml` | Adda247 proxy diagnostic workflow |
-| `.github/workflows/test_adda_python_proxy.yml` | Python-to-proxy integration diagnostic workflow |
 | `GoogleAppsScript/Code.gs` | Google Drive PDF upload bridge |
 | `GoogleAppsScript/Scheduler.gs` | Optional Apps Script dispatcher and workflow email monitor |
 | `temp.py` | Auxiliary/working script; not invoked by the production workflow |

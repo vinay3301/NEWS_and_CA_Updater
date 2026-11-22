@@ -3,7 +3,7 @@ name: Scheduled and Manual Production News CA PDF Update
 on:
   # GitHub cron uses UTC. Every 4 hours, around the clock.
   schedule:
-    - cron: "0 */4 * * *"
+    - cron: "30 */4 * * *"
 
   workflow_dispatch:
     inputs:

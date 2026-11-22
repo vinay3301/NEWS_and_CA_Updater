@@ -3405,6 +3405,15 @@ def generate_pdf_document(
                 )
             )
 
+            if item.get("content_extracted") is False:
+                story.append(
+                    Paragraph(
+                        '<font color="#B45309"><b>Article text unavailable '
+                        'after retries. Open the source link above.</b></font>',
+                        meta_style
+                    )
+                )
+
             if (
                 "structured_content" in item
                 and item["structured_content"]
@@ -3921,12 +3930,12 @@ def run_updates():
             adda_session
         )
         if incomplete_adda_rows:
-            raise RuntimeError(
-                f"Aborting before PDF generation and Google Drive upload: "
-                f"{len(incomplete_adda_rows)} Adda247 article(s) still have "
-                f"headline-only content after recovery retries. Existing "
-                f"Google Drive PDFs were not changed. See INCOMPLETE ARTICLE "
-                f"entries above."
+            # Keep failed articles in the digest as headline + clickable
+            # source link. The PDF renderer already prints each row's raw_link.
+            # Mark them so readers can see that the article body was unavailable.
+            print(
+                f"[Adda247] Continuing with {len(incomplete_adda_rows)} "
+                f"article(s) as headline + source link; full text unavailable."
             )
 
     if rows_banking:

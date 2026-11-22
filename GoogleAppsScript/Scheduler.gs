@@ -1,16 +1,15 @@
 /**
  * NEWS & CA Updater — independent Google Apps Script scheduler.
  *
- * This is a SEPARATE Apps Script project. Do not paste into the existing
- * PDF upload bridge project. Set project timezone to Asia/Kolkata.
+ * Separate Apps Script project; do not paste into the existing upload bridge.
+ * Set project timezone to Asia/Kolkata.
  *
- * Script Properties required:
- *   GITHUB_TOKEN  Fine-grained PAT with Actions: Read and write on this repo
- *   ALERT_EMAIL   Email address for run result alerts
+ * Script Properties:
+ *   GITHUB_TOKEN  Fine-grained PAT: Actions Read and write on this repo
+ *   ALERT_EMAIL   Address for scheduler/workflow alerts
  *
- * First run testGitHubConnection() (read-only), then setupScheduler().
- * Do not enable this scheduler until the GitHub cron is disabled, otherwise
- * the old cron and this scheduler can launch duplicate production runs.
+ * Run testGitHubConnection() first. Do NOT run setupScheduler() until the
+ * GitHub Actions cron is disabled, or both schedulers may upload duplicate PDFs.
  */
 
 const CONFIG = Object.freeze({
@@ -20,7 +19,8 @@ const CONFIG = Object.freeze({
   BRANCH: 'main',
   TIMEZONE: 'Asia/Kolkata',
   HOURS: [2, 6, 10, 14, 18, 22],
-  MONITOR_MINUTES: 10,
+  POLL_MINUTES: 10,
+  SLOT_GRACE_MINUTES: 55,
   DISPATCH_GRACE_MINUTES: 20
 });
 
@@ -28,16 +28,15 @@ const PROP = Object.freeze({
   TOKEN: 'GITHUB_TOKEN',
   ALERT_EMAIL: 'ALERT_EMAIL',
   PENDING_AT: 'PENDING_DISPATCH_AT',
+  PENDING_BASELINE_ID: 'PENDING_BASELINE_RUN_ID',
+  PENDING_SLOT: 'PENDING_DISPATCH_SLOT',
   LAST_NOTIFIED_RUN: 'LAST_NOTIFIED_RUN_ID',
   LAST_SLOT: 'LAST_DISPATCH_SLOT'
 });
 
-/** Read-only connection test. Does not start a workflow or upload PDFs. */
+/** Read-only test. Does not start a workflow or upload PDFs. */
 function testGitHubConnection() {
-  const response = githubRequest_(
-    'get',
-    '/actions/workflows/' + CONFIG.WORKFLOW
-  );
+  const response = githubRequest_('get', '/actions/workflows/' + CONFIG.WORKFLOW);
   if (response.getResponseCode() !== 200) {
     throw new Error('GitHub connection test failed: HTTP ' +
       response.getResponseCode() + ' — ' + response.getContentText());
@@ -49,8 +48,9 @@ function testGitHubConnection() {
 }
 
 /**
- * Install six daily time-driven triggers and a 10-minute run monitor.
- * Run once only after the GitHub cron has been disabled.
+ * One 10-minute dispatcher checks whether a scheduled IST slot is due.
+ * A 55-minute window tolerates Apps Script trigger timing drift.
+ * Also installs a separate 10-minute run monitor.
  */
 function setupScheduler() {
   const handlers = ['scheduledProductionDispatch', 'monitorProductionRun'];
@@ -60,25 +60,16 @@ function setupScheduler() {
     }
   });
 
-  CONFIG.HOURS.forEach(function(hour) {
-    ScriptApp.newTrigger('scheduledProductionDispatch')
-      .timeBased()
-      .atHour(hour)
-      .nearMinute(0)
-      .everyDays(1)
-      .inTimezone(CONFIG.TIMEZONE)
-      .create();
-  });
+  ScriptApp.newTrigger('scheduledProductionDispatch')
+    .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
 
   ScriptApp.newTrigger('monitorProductionRun')
-    .timeBased()
-    .everyMinutes(CONFIG.MONITOR_MINUTES)
-    .create();
+    .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
 
-  Logger.log('Installed 6 daily dispatch triggers (IST) and 10-minute monitor.');
+  Logger.log('Installed one 10-minute dispatcher and one 10-minute monitor. Target slots are 02:00, 06:00, 10:00, 14:00, 18:00 and 22:00 IST.');
 }
 
-/** Called by each daily time trigger. */
+/** Runs every 10 minutes and dispatches at most once per configured IST slot. */
 function scheduledProductionDispatch() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
@@ -87,52 +78,67 @@ function scheduledProductionDispatch() {
   }
 
   try {
+    const props = PropertiesService.getScriptProperties();
+
+    // Never start a second job while a previous dispatch is awaiting tracking.
+    if (props.getProperty(PROP.PENDING_AT)) {
+      Logger.log('A previous dispatch is still pending; waiting for monitor.');
+      return;
+    }
+
     const now = new Date();
     const hour = Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'H'));
-    if (CONFIG.HOURS.indexOf(hour) === -1) {
-      Logger.log('Trigger fired outside configured hour; skipping: ' + now);
+    const minute = Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'm'));
+    if (CONFIG.HOURS.indexOf(hour) === -1 || minute > CONFIG.SLOT_GRACE_MINUTES) {
       return;
     }
 
     const slot = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd-HH');
-    const props = PropertiesService.getScriptProperties();
     if (props.getProperty(PROP.LAST_SLOT) === slot) {
-      Logger.log('Duplicate trigger for slot %s; skipping.', slot);
+      Logger.log('Slot %s was already dispatched; skipping.', slot);
       return;
     }
 
-    // Avoid overlapping production jobs. Do not dispatch if an earlier run
-    // is queued or in progress.
-    const active = getWorkflowRuns_('workflow_dispatch', 10).find(function(run) {
+    const previousRuns = getWorkflowRuns_('workflow_dispatch', 20);
+    const active = previousRuns.find(function(run) {
       return run.status === 'queued' || run.status === 'in_progress';
     });
     if (active) {
       notify_('NEWS CA scheduler skipped a slot',
-        'An earlier manual production workflow is still ' + active.status +
+        'An earlier workflow_dispatch run is still ' + active.status +
         '. No second run was started.\n' + active.html_url);
+      props.setProperty(PROP.LAST_SLOT, slot);
       return;
     }
 
-    const body = {
-      ref: CONFIG.BRANCH,
-      inputs: { confirm_drive_upload: 'yes' }
-    };
-    const response = githubRequest_(
-      'post',
-      '/actions/workflows/' + CONFIG.WORKFLOW + '/dispatches',
-      body
-    );
+    const baselineId = previousRuns.reduce(function(maxId, run) {
+      return Math.max(maxId, Number(run.id) || 0);
+    }, 0);
+    const dispatchAt = Date.now();
+
+    // Save tracking state before POST. If the HTTP call times out after GitHub
+    // accepted it, the monitor can still find the run and avoid duplicate sends.
+    props.setProperty(PROP.PENDING_AT, String(dispatchAt));
+    props.setProperty(PROP.PENDING_BASELINE_ID, String(baselineId));
+    props.setProperty(PROP.PENDING_SLOT, slot);
+    props.setProperty(PROP.LAST_SLOT, slot);
+
+    const response = githubRequest_('post',
+      '/actions/workflows/' + CONFIG.WORKFLOW + '/dispatches', {
+        ref: CONFIG.BRANCH,
+        inputs: { confirm_drive_upload: 'yes' }
+      });
 
     if (response.getResponseCode() !== 204) {
+      clearPending_(props);
+      props.deleteProperty(PROP.LAST_SLOT);
       throw new Error('Workflow dispatch failed: HTTP ' +
         response.getResponseCode() + ' — ' + response.getContentText());
     }
 
-    props.setProperty(PROP.LAST_SLOT, slot);
-    props.setProperty(PROP.PENDING_AT, String(Date.now()));
-    Logger.log('GitHub accepted production workflow dispatch for slot %s.', slot);
+    Logger.log('GitHub accepted workflow dispatch for IST slot %s.', slot);
   } catch (error) {
-    notify_('NEWS CA scheduler could not start production workflow',
+    notify_('NEWS CA scheduler could not confirm workflow dispatch',
       String(error && error.stack ? error.stack : error));
     throw error;
   } finally {
@@ -140,46 +146,64 @@ function scheduledProductionDispatch() {
   }
 }
 
-/** Poll GitHub for the dispatched run and email its final result. */
+/** Poll only for a new run created after the saved pre-dispatch baseline. */
 function monitorProductionRun() {
   const props = PropertiesService.getScriptProperties();
   const pendingAt = Number(props.getProperty(PROP.PENDING_AT) || 0);
   if (!pendingAt) return;
 
-  const runs = getWorkflowRuns_('workflow_dispatch', 10);
-  const run = runs.find(function(item) {
-    return new Date(item.created_at).getTime() >= pendingAt - 3 * 60 * 1000;
-  });
+  try {
+    const baselineId = Number(props.getProperty(PROP.PENDING_BASELINE_ID) || 0);
+    const runs = getWorkflowRuns_('workflow_dispatch', 20);
+    const run = runs.find(function(item) {
+      return Number(item.id) > baselineId &&
+        new Date(item.created_at).getTime() >= pendingAt - 2 * 60 * 1000 &&
+        item.head_branch === CONFIG.BRANCH;
+    });
 
-  if (!run) {
-    if (Date.now() - pendingAt > CONFIG.DISPATCH_GRACE_MINUTES * 60 * 1000) {
-      notify_('NEWS CA workflow dispatch not visible in GitHub',
-        'Apps Script sent the workflow_dispatch request, but no matching run ' +
-        'appeared within ' + CONFIG.DISPATCH_GRACE_MINUTES + ' minutes. Check GitHub Actions.');
-      props.deleteProperty(PROP.PENDING_AT);
+    if (!run) {
+      if (Date.now() - pendingAt > CONFIG.DISPATCH_GRACE_MINUTES * 60 * 1000) {
+        notify_('NEWS CA workflow dispatch not visible in GitHub',
+          'Apps Script sent the dispatch request, but no new matching workflow run ' +
+          'appeared within ' + CONFIG.DISPATCH_GRACE_MINUTES +
+          ' minutes. Check GitHub Actions. The slot will not be automatically retried.');
+        clearPending_(props);
+      }
+      return;
     }
-    return;
+
+    if (run.status !== 'completed') return;
+
+    if (props.getProperty(PROP.LAST_NOTIFIED_RUN) === String(run.id)) {
+      clearPending_(props);
+      return;
+    }
+
+    const successful = run.conclusion === 'success';
+    notify_(
+      successful ? 'NEWS CA PDFs uploaded successfully' : 'NEWS CA production workflow failed',
+      'Workflow: ' + run.name + '\nConclusion: ' + run.conclusion +
+      '\nStarted: ' + run.created_at + '\nRun: ' + run.html_url +
+      (successful
+        ? '\nThe workflow completed successfully, including its PDF upload steps.'
+        : '\nOpen the run link to inspect the failed step.')
+    );
+
+    props.setProperty(PROP.LAST_NOTIFIED_RUN, String(run.id));
+    clearPending_(props);
+  } catch (error) {
+    // Keep pending state so the next monitor execution can retry the check.
+    Logger.log('Run monitor error: ' + error);
+    notify_('NEWS CA scheduler monitor encountered an error',
+      String(error && error.stack ? error.stack : error));
+    throw error;
   }
+}
 
-  if (run.status !== 'completed') return;
-
-  if (props.getProperty(PROP.LAST_NOTIFIED_RUN) === String(run.id)) {
-    props.deleteProperty(PROP.PENDING_AT);
-    return;
-  }
-
-  const successful = run.conclusion === 'success';
-  notify_(
-    successful ? 'NEWS CA PDFs uploaded successfully' : 'NEWS CA production workflow failed',
-    'Workflow: ' + run.name + '\nConclusion: ' + run.conclusion +
-    '\nStarted: ' + run.created_at + '\nRun: ' + run.html_url +
-    (successful
-      ? '\nThe workflow completed successfully, including its PDF upload step.'
-      : '\nOpen the run link to inspect the failed step.')
-  );
-
-  props.setProperty(PROP.LAST_NOTIFIED_RUN, String(run.id));
+function clearPending_(props) {
   props.deleteProperty(PROP.PENDING_AT);
+  props.deleteProperty(PROP.PENDING_BASELINE_ID);
+  props.deleteProperty(PROP.PENDING_SLOT);
 }
 
 function getWorkflowRuns_(event, limit) {
@@ -190,7 +214,7 @@ function getWorkflowRuns_(event, limit) {
     throw new Error('Could not read workflow runs: HTTP ' +
       response.getResponseCode() + ' — ' + response.getContentText());
   }
-  return (JSON.parse(response.getContentText()).workflow_runs || []);
+  return JSON.parse(response.getContentText()).workflow_runs || [];
 }
 
 function githubRequest_(method, path, payload) {
@@ -224,7 +248,7 @@ function notify_(subject, body) {
   MailApp.sendEmail({ to: email, subject: subject, body: body });
 }
 
-/** Remove only this scheduler's triggers; does not change GitHub workflow. */
+/** Remove only this scheduler's triggers; does not alter GitHub workflow. */
 function removeSchedulerTriggers() {
   const handlers = ['scheduledProductionDispatch', 'monitorProductionRun'];
   ScriptApp.getProjectTriggers().forEach(function(trigger) {

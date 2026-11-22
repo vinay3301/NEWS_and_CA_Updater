@@ -235,6 +235,92 @@ HEADERS = {
     'Accept-Language': 'en-US,en;q=0.9'
 }
 
+# === ADDA247 APPS SCRIPT FETCH PROXY ===
+ADDA247_PROXY_URL = os.environ.get("ADDA247_PROXY_URL", "").strip()
+ADDA247_PROXY_SECRET = os.environ.get("ADDA247_PROXY_SECRET", "")
+
+
+class Adda247ProxySession:
+    """Route only Adda247 GET requests through Apps Script; leave all other hosts direct."""
+
+    ADDA247_HOSTS = {
+        "currentaffairs.adda247.com",
+        "www.currentaffairs.adda247.com"
+    }
+
+    def __init__(self, direct_session):
+        self.direct_session = direct_session
+        self.proxy_transport = requests.Session()
+
+    def get(self, url, headers=None, timeout=None, **kwargs):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in self.ADDA247_HOSTS
+        ):
+            return self.direct_session.get(
+                url, headers=headers, timeout=timeout, **kwargs
+            )
+
+        if not ADDA247_PROXY_URL or not ADDA247_PROXY_SECRET:
+            raise RuntimeError(
+                "Adda247 proxy settings are missing. Configure "
+                "ADDA247_PROXY_URL and ADDA247_PROXY_SECRET in GitHub Actions."
+            )
+
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                proxy_response = self.proxy_transport.post(
+                    ADDA247_PROXY_URL,
+                    json={"secret": ADDA247_PROXY_SECRET, "url": url},
+                    headers={"Content-Type": "application/json"},
+                    timeout=(30, 180)
+                )
+                proxy_response.raise_for_status()
+                result = proxy_response.json()
+
+                origin_status = int(result.get("status") or 0)
+                page_html = result.get("html") or ""
+                if result.get("ok") and origin_status == 200 and page_html:
+                    response = requests.Response()
+                    response.status_code = 200
+                    response.url = url
+                    response.encoding = "utf-8"
+                    response._content = page_html.encode("utf-8")
+                    response.headers["Content-Type"] = (
+                        result.get("contentType") or "text/html; charset=UTF-8"
+                    )
+                    print(
+                        f"[Adda247 Proxy] HTTP {origin_status}; "
+                        f"{len(page_html)} HTML characters; attempt {attempt}: {url}"
+                    )
+                    return response
+
+                last_error = RuntimeError(
+                    f"Apps Script could not fetch Adda247 URL "
+                    f"(origin HTTP {origin_status}, HTML length {len(page_html)})."
+                )
+
+            except Exception as exc:
+                last_error = exc
+
+            print(
+                f"[Adda247 Proxy] Attempt {attempt}/3 failed for {url}: "
+                f"{type(last_error).__name__}: {last_error}"
+            )
+            if attempt < 3:
+                time.sleep(3)
+
+        raise RuntimeError(
+            f"Adda247 proxy failed after 3 attempts for {url}: {last_error}"
+        ) from last_error
+
+
+
+
 
 def check_internet():
     try:
@@ -3511,6 +3597,20 @@ def run_updates():
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    # In GitHub Actions, route Adda247 listing and article requests through
+    # the dedicated Apps Script fetch proxy. AffairsCloud, RSS, images and
+    # all other requests continue using the original direct session.
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        if not ADDA247_PROXY_URL or not ADDA247_PROXY_SECRET:
+            raise RuntimeError(
+                "Configure ADDA247_PROXY_URL and ADDA247_PROXY_SECRET "
+                "in GitHub Actions to fetch Adda247."
+            )
+        adda_session = Adda247ProxySession(session)
+    else:
+        # Preserve the existing direct-fetch behavior on Android/Pydroid.
+        adda_session = session
+
     notif_lines = []
 
     # 1. RSS NEWS ARTICLES
@@ -3644,7 +3744,7 @@ def run_updates():
 
     adda_items = (
         fetch_adda247_previous_3_days(
-            session
+            adda_session
         )
     )
 
@@ -3683,7 +3783,7 @@ def run_updates():
 
     rows_banking = (
         fetch_banking_current_affairs(
-            session,
+            adda_session,
             cutoff_days=90
         )
     )

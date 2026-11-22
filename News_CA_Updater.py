@@ -2102,8 +2102,8 @@ def extract_adda247_article_content(session, url, headline):
         extract_affairscloud_rich_content(session, url, headline)
     )
 
-    normalized_text = re.sub(r"\\s+", " ", (plain_text or "")).strip().casefold()
-    normalized_headline = re.sub(r"\\s+", " ", (headline or "")).strip().casefold()
+    normalized_text = re.sub(r"\s+", " ", (plain_text or "")).strip().casefold()
+    normalized_headline = re.sub(r"\s+", " ", (headline or "")).strip().casefold()
     content_ok = (
         bool(normalized_text)
         and normalized_text != normalized_headline
@@ -2125,9 +2125,9 @@ def retry_incomplete_adda247_articles(rows, session):
     incomplete_by_url = {}
     for row in rows:
         if not row.get("content_extracted", True):
-            incomplete_by_url.setdefault(row.get("raw_link"), row)
-
-    incomplete_by_url.pop(None, None)
+            url = row.get("raw_link")
+            if url:
+                incomplete_by_url.setdefault(url, []).append(row)
     if not incomplete_by_url:
         print("[Adda247] Content verification: all article pages extracted.")
         return []
@@ -2138,7 +2138,8 @@ def retry_incomplete_adda247_articles(rows, session):
     )
 
     still_incomplete = []
-    for url, row in incomplete_by_url.items():
+    for url, affected_rows in incomplete_by_url.items():
+        row = affected_rows[0]
         recovered = False
         for retry_number, wait_seconds in enumerate((5, 15), start=1):
             print(
@@ -2154,11 +2155,12 @@ def retry_incomplete_adda247_articles(rows, session):
                     )
                 )
                 if content_ok:
-                    row["desc"] = plain_text
-                    row["plain_text"] = plain_text
-                    row["structured_content"] = structured_blocks
-                    row["image_url"] = image_url
-                    row["content_extracted"] = True
+                    for affected_row in affected_rows:
+                        affected_row["desc"] = plain_text
+                        affected_row["plain_text"] = plain_text
+                        affected_row["structured_content"] = structured_blocks
+                        affected_row["image_url"] = image_url
+                        affected_row["content_extracted"] = True
                     recovered = True
                     print(f"[Adda247] RECOVERED: {row.get('title', url)}")
                     break
@@ -2169,7 +2171,8 @@ def retry_incomplete_adda247_articles(rows, session):
                 )
 
         if not recovered:
-            row["content_extracted"] = False
+            for affected_row in affected_rows:
+                affected_row["content_extracted"] = False
             still_incomplete.append(row)
 
     print(

@@ -1,0 +1,193 @@
+name: Test Production Adda247 Scraper Through Apps Script Proxy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-python-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install production dependencies
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: Run production Adda247 scraper functions in isolated test mode
+        env:
+          ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}
+          ADDA247_PROXY_SECRET: ${{ secrets.ADDA247_PROXY_SECRET }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          from types import SimpleNamespace
+          from urllib.parse import urlparse
+
+          import requests
+          import News_CA_Updater as scraper
+
+          proxy_url = os.environ.get("ADDA247_PROXY_URL", "").strip()
+          proxy_secret = os.environ.get("ADDA247_PROXY_SECRET", "")
+
+          if not proxy_url or not proxy_secret:
+              raise SystemExit("Missing Adda247 proxy GitHub secrets.")
+
+          transport = requests.Session()
+          transport.headers.update({"Content-Type": "application/json"})
+
+          class AppsScriptProxySession:
+              """Drop-in GET session for the production scraper; fetches Adda247 via Apps Script."""
+
+              def __init__(self):
+                  self.article_requests = 0
+                  self.listing_requests = 0
+                  self.article_successes = 0
+                  self.failed_requests = 0
+
+              def get(self, url, headers=None, timeout=None):
+                  parsed = urlparse(url)
+                  if parsed.hostname not in (
+                      "currentaffairs.adda247.com",
+                      "www.currentaffairs.adda247.com",
+                  ):
+                      raise RuntimeError("Test session blocked non-Adda247 URL: " + url)
+
+                  is_article = (
+                      parsed.path.rstrip("/") not in (
+                          "",
+                          "/latest-posts",
+                          "/banking-current-affairs",
+                      )
+                  )
+
+                  if "lcp_page0=" in parsed.query:
+                      print("TEST LIMIT: stopping after banking listing page 1.")
+                      return SimpleNamespace(status_code=204, text="", url=url)
+
+                  if is_article:
+                      self.article_requests += 1
+                  else:
+                      self.listing_requests += 1
+
+                  last_status = 0
+                  last_html = ""
+
+                  for attempt in (1, 2, 3):
+                      try:
+                          response = transport.post(
+                              proxy_url,
+                              json={"secret": proxy_secret, "url": url},
+                              timeout=(30, 180),
+                          )
+                          response.raise_for_status()
+                          result = response.json()
+                          last_status = int(result.get("status") or 0)
+                          last_html = result.get("html") or ""
+
+                          print(
+                              "PROXY",
+                              "article" if is_article else "listing",
+                              parsed.path,
+                              "attempt", attempt,
+                              "origin status", last_status,
+                              "HTML bytes", len(last_html),
+                          )
+
+                          if result.get("ok") and last_status == 200 and len(last_html) > 10000:
+                              if is_article:
+                                  self.article_successes += 1
+                              return SimpleNamespace(
+                                  status_code=200,
+                                  text=last_html,
+                                  url=url,
+                              )
+
+                      except Exception as exc:
+                          print("Proxy attempt", attempt, "failed:", type(exc).__name__, str(exc)[:240])
+
+                      if attempt < 3:
+                          time.sleep(3)
+
+                  self.failed_requests += 1
+                  return SimpleNamespace(
+                      status_code=last_status or 502,
+                      text=last_html,
+                      url=url,
+                  )
+
+          proxy_session = AppsScriptProxySession()
+
+          # Keep the real article HTML parser, but cap full article downloads
+          # to five pages so this diagnostic run does not exhaust UrlFetch quota.
+          original_extractor = scraper.extract_affairscloud_rich_content
+          article_parse_count = 0
+          successful_content_parses = 0
+
+          def capped_real_extractor(session, url, headline):
+              nonlocal article_parse_count, successful_content_parses
+              if article_parse_count >= 5:
+                  return (
+                      headline,
+                      [{"type": "paragraph", "text": headline}],
+                      None,
+                  )
+
+              article_parse_count += 1
+              plain_text, structured, image_url = original_extractor(
+                  session, url, headline
+              )
+              if plain_text and len(plain_text.strip()) > len(headline.strip()) + 20:
+                  successful_content_parses += 1
+              print(
+                  "PRODUCTION ARTICLE PARSER:",
+                  "content chars =", len(plain_text or ""),
+                  "structured blocks =", len(structured or []),
+                  "image found =", bool(image_url),
+              )
+              return plain_text, structured, image_url
+
+          scraper.extract_affairscloud_rich_content = capped_real_extractor
+
+          print("\n========== PRODUCTION FUNCTION: RECENT CURRENT AFFAIRS ==========")
+          ca_rows = scraper.fetch_adda247_previous_3_days(proxy_session)
+
+          print("\n========== PRODUCTION FUNCTION: BANKING CURRENT AFFAIRS ==========")
+          banking_rows = scraper.fetch_banking_current_affairs(
+              proxy_session,
+              cutoff_days=90,
+          )
+
+          print("\n==================== INTEGRATION SUMMARY ====================")
+          print("Recent CA rows returned:", len(ca_rows))
+          print("Banking rows returned:", len(banking_rows))
+          print("Listing requests:", proxy_session.listing_requests)
+          print("Article requests attempted:", proxy_session.article_requests)
+          print("Article pages fetched successfully:", proxy_session.article_successes)
+          print("Real production article parses attempted:", article_parse_count)
+          print("Real production article parses with substantive content:", successful_content_parses)
+          print("Proxy requests that exhausted retries:", proxy_session.failed_requests)
+
+          for label, rows in (("Recent CA", ca_rows), ("Banking", banking_rows)):
+              for row in rows[:3]:
+                  print(label, "sample:", row.get("title", "")[:140])
+                  print("  description chars:", len(row.get("desc") or ""))
+                  print("  structured blocks:", len(row.get("structured_content") or []))
+
+          if not ca_rows:
+              raise SystemExit("FAIL: production recent-CA scraper returned zero rows.")
+          if not banking_rows:
+              raise SystemExit("FAIL: production banking scraper returned zero rows.")
+          if proxy_session.article_successes == 0:
+              raise SystemExit("FAIL: no individual article HTML was fetched through the proxy.")
+          if successful_content_parses == 0:
+              raise SystemExit("FAIL: production article parser did not extract substantive article content.")
+
+          print("PASS: both production Adda247 listing functions and the real article parser worked through Apps Script.")
+          PY

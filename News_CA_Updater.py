@@ -2956,8 +2956,15 @@ def prepare_pdf_image(image_bytes, is_desktop=False):
                 optimize=True,
                 progressive=True
             )
-            output.seek(0)
-            return output
+            optimized_bytes = output.getvalue()
+            print(
+                f"[PDF Image] {'Desktop' if is_desktop else 'Mobile'}: "
+                f"{original_size[0]}x{original_size[1]} -> "
+                f"{image.width}x{image.height}; "
+                f"{len(image_bytes) / 1024:.0f} KB -> "
+                f"{len(optimized_bytes) / 1024:.0f} KB"
+            )
+            return BytesIO(optimized_bytes)
     except Exception as exc:
         print(
             f"[!] Image optimization skipped; using original image: {exc}"

@@ -53,15 +53,7 @@ function testGitHubConnection() {
  */
 function setupScheduler() {
   const props = PropertiesService.getScriptProperties();
-  if (!props.getProperty(PROP.LAST_NOTIFIED_RUN)) {
-    const existing = getWorkflowRuns_('workflow_dispatch', 100);
-    const latestId = existing.reduce(function(maxId, run) {
-      return Math.max(maxId, Number(run.id) || 0);
-    }, 0);
-    props.setProperty(PROP.LAST_NOTIFIED_RUN, String(latestId));
-    Logger.log('Notification baseline set to existing workflow run ID %s.', latestId);
-  }
-
+  seedNotificationCursor_(props);
   const handlers = ['scheduledProductionDispatch', 'monitorProductionRun'];
   ScriptApp.getProjectTriggers().forEach(function(trigger) {
     if (handlers.indexOf(trigger.getHandlerFunction()) !== -1) {
@@ -74,7 +66,38 @@ function setupScheduler() {
   ScriptApp.newTrigger('monitorProductionRun')
     .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
 
-  Logger.log('Installed dispatcher and monitor. Completion emails will cover both manually started and Apps Script-started workflow_dispatch runs.');
+  Logger.log('Installed dispatcher and monitor. Completion emails cover manual and scheduled workflow runs.');
+}
+
+/**
+ * Safe transition step: installs only the email monitor.
+ * It does not dispatch production workflows or alter the GitHub cron.
+ */
+function setupNotificationMonitor() {
+  const props = PropertiesService.getScriptProperties();
+  seedNotificationCursor_(props);
+
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === 'monitorProductionRun') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+  ScriptApp.newTrigger('monitorProductionRun')
+    .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
+
+  Logger.log('Installed notification-only monitor. It will email results for manual and scheduled runs; no production workflow was started.');
+}
+
+/** Seed at the latest existing run so setup does not email old run history. */
+function seedNotificationCursor_(props) {
+  if (!props.getProperty(PROP.LAST_NOTIFIED_RUN)) {
+    const existing = getWorkflowRuns_(null, 100);
+    const latestId = existing.reduce(function(maxId, run) {
+      return Math.max(maxId, Number(run.id) || 0);
+    }, 0);
+    props.setProperty(PROP.LAST_NOTIFIED_RUN, String(latestId));
+    Logger.log('Notification baseline set to existing workflow run ID %s.', latestId);
+  }
 }
 
 /** Runs every 10 minutes and dispatches at most once per configured IST slot. */
@@ -103,9 +126,10 @@ function scheduledProductionDispatch() {
       return;
     }
 
-    const previousRuns = getWorkflowRuns_('workflow_dispatch', 100);
+    const previousRuns = getWorkflowRuns_(null, 100);
     const active = previousRuns.find(function(run) {
-      return run.status === 'queued' || run.status === 'in_progress';
+      return (run.event === 'workflow_dispatch' || run.event === 'schedule') &&
+        (run.status === 'queued' || run.status === 'in_progress');
     });
     if (active) {
       notify_('NEWS CA scheduler skipped a slot',
@@ -155,7 +179,7 @@ function monitorProductionRun() {
   const props = PropertiesService.getScriptProperties();
 
   try {
-    const runs = getWorkflowRuns_('workflow_dispatch', 100);
+    const runs = getWorkflowRuns_(null, 100);
     const lastNotified = Number(props.getProperty(PROP.LAST_NOTIFIED_RUN) || 0);
 
     // API returns newest first; process in ascending ID order so an older
@@ -166,6 +190,7 @@ function monitorProductionRun() {
       const run = runs[i];
       if (Number(run.id) <= lastNotified) continue;
       if (run.head_branch !== CONFIG.BRANCH) continue;
+      if (run.event !== 'workflow_dispatch' && run.event !== 'schedule') continue;
       if (run.status !== 'completed') break;
 
       const successful = run.conclusion === 'success';
@@ -226,7 +251,8 @@ function clearPending_(props) {
 
 function getWorkflowRuns_(event, limit) {
   const path = '/actions/workflows/' + CONFIG.WORKFLOW +
-    '/runs?event=' + encodeURIComponent(event) + '&per_page=' + limit;
+    '/runs?' + (event ? 'event=' + encodeURIComponent(event) + '&' : '') +
+    'per_page=' + limit;
   const response = githubRequest_('get', path);
   if (response.getResponseCode() !== 200) {
     throw new Error('Could not read workflow runs: HTTP ' +

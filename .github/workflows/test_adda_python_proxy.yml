@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - "News_CA_Updater.py"
       - ".github/workflows/test_adda_python_proxy.yml"
 
 jobs:

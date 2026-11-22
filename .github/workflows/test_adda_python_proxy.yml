@@ -80,6 +80,52 @@ jobs:
           print("PASS: persistently incomplete article is retained for headline + source-link PDF fallback.")
           PY
 
+      - name: Test PDF upload timeout and retry handling without contacting Drive
+        run: |
+          python - <<'PY'
+          import tempfile
+          from unittest.mock import patch
+
+          import requests
+          import News_CA_Updater as scraper
+
+          scraper.UPLOAD_BRIDGE_URL = "https://test.invalid/"
+          scraper.UPLOAD_BRIDGE_SECRET = "test-only-not-used"
+          scraper.time.sleep = lambda _seconds: None
+
+          attempts = []
+
+          class FakeResponse:
+              def raise_for_status(self):
+                  return None
+
+              def json(self):
+                  return {
+                      "ok": True,
+                      "action": "updated",
+                      "fileId": "test-file-id",
+                      "size": 1234,
+                  }
+
+          def fake_post(url, json, headers, timeout):
+              attempts.append(timeout)
+              assert timeout == (180, 600), "Upload timeout settings were not increased."
+              if len(attempts) == 1:
+                  raise requests.exceptions.ConnectionError("simulated write timeout")
+              return FakeResponse()
+
+          with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+              pdf.write(b"%PDF-1.4 test payload")
+              pdf.flush()
+              with patch.object(scraper.requests, "post", side_effect=fake_post):
+                  assert scraper.upload_pdf_via_apps_script(
+                      pdf.name, "Daily_Articles.pdf"
+                  ) is True
+
+          assert len(attempts) == 2, "Upload did not retry after the simulated timeout."
+          print("PASS: upload retries transient write failures and succeeds without a real Drive request.")
+          PY
+
       - name: Run production Adda247 scraper functions in isolated test mode
         env:
           ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}

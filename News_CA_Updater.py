@@ -2612,7 +2612,12 @@ def fetch_adda247_previous_3_days(session):
         reverse=True
     )
 
-    print(f"[Adda247 CA] Articles extracted: {len(rows_adda)}")
+    full_text_count = sum(1 for row in rows_adda if row.get("content_extracted"))
+    print(
+        f"[Adda247 CA] Articles discovered: {len(rows_adda)}; "
+        f"full text on first pass: {full_text_count}; "
+        f"headline-only pending recovery: {len(rows_adda) - full_text_count}"
+    )
 
     return rows_adda
 
@@ -2794,7 +2799,12 @@ def fetch_banking_current_affairs(
             )
             break
 
-    print(f"[Adda247 Banking] Articles extracted: {len(rows_banking)}")
+    full_text_count = sum(1 for row in rows_banking if row.get("content_extracted"))
+    print(
+        f"[Adda247 Banking] Articles discovered: {len(rows_banking)}; "
+        f"full text on first pass: {full_text_count}; "
+        f"headline-only pending recovery: {len(rows_banking) - full_text_count}"
+    )
     return rows_banking
 
 

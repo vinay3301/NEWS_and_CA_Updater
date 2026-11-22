@@ -65,7 +65,7 @@ jobs:
           print("Finding an individual article URL in the latest-posts HTML...")
           article_url = None
           if latest_html:
-              links = re.findall(r"""href\\s*=\\s*["']([^"']+)["']""", latest_html, flags=re.IGNORECASE)
+              links = re.findall(r"""href\s*=\s*["']([^"']+)["']""", latest_html, flags=re.IGNORECASE)
               excluded = (
                   "/latest-posts", "/banking-current-affairs", "/category/",
                   "/tag/", "/author/", "/wp-content/", "/wp-json/"

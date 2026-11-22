@@ -3120,7 +3120,7 @@ def generate_pdf_document(
 
     story = []
 
-    today_str = datetime.now().strftime(
+    today_str = india_now().strftime(
         "%d %B %Y"
     )
 
@@ -3134,7 +3134,7 @@ def generate_pdf_document(
     story.append(
         Paragraph(
             f"Last Updated: "
-            f"{datetime.now().strftime('%d %b %Y, %H:%M IST')}",
+            f"{india_now().strftime('%d %b %Y, %H:%M IST')}",
             updated_time_style
         )
     )

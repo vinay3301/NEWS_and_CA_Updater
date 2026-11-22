@@ -22,6 +22,63 @@ jobs:
       - name: Install production dependencies
         run: python -m pip install --quiet -r requirements.txt
 
+      - name: Compile scraper and test Adda247 recovery safeguards
+        env:
+          GITHUB_ACTIONS: "true"
+          GOOGLE_APPS_SCRIPT_URL: "https://test.invalid/"
+          GOOGLE_APPS_SCRIPT_SECRET: "test-only-not-used"
+        run: |
+          python -m py_compile News_CA_Updater.py
+          python - <<'PY'
+          import News_CA_Updater as scraper
+
+          headline = "Prathap Singh appointed to an important banking leadership role"
+          fallback = (
+              headline,
+              [{"type": "paragraph", "text": headline}],
+              None,
+          )
+
+          scraper.extract_affairscloud_rich_content = lambda *args: fallback
+          result = scraper.extract_adda247_article_content(
+              object(), "https://currentaffairs.adda247.com/test-article/", headline
+          )
+          assert result[3] is False, "Headline-only fallback was incorrectly marked complete."
+
+          body = headline + "\\n\\nThe institution announced the appointment and provided further details."
+          scraper.extract_affairscloud_rich_content = lambda *args: (
+              body,
+              [{"type": "paragraph", "text": body}],
+              None,
+          )
+          result = scraper.extract_adda247_article_content(
+              object(), "https://currentaffairs.adda247.com/test-article/", headline
+          )
+          assert result[3] is True, "Substantive article body was incorrectly marked incomplete."
+
+          scraper.time.sleep = lambda _seconds: None
+          row = {
+              "title": headline,
+              "raw_link": "https://currentaffairs.adda247.com/test-article/",
+              "desc": headline,
+              "plain_text": headline,
+              "structured_content": fallback[1],
+              "image_url": None,
+              "content_extracted": False,
+          }
+          incomplete = scraper.retry_incomplete_adda247_articles([row], object())
+          assert not incomplete and row["content_extracted"] is True
+          assert "further details" in row["desc"]
+          print("PASS: fallback detection, second-pass recovery, and row update.")
+
+          scraper.extract_affairscloud_rich_content = lambda *args: fallback
+          row["content_extracted"] = False
+          incomplete = scraper.retry_incomplete_adda247_articles([row], object())
+          assert len(incomplete) == 1
+          assert incomplete[0]["content_extracted"] is False
+          print("PASS: persistently incomplete article is reported for upload blocking.")
+          PY
+
       - name: Run production Adda247 scraper functions in isolated test mode
         env:
           ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}

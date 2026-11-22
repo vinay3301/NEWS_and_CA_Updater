@@ -1,0 +1,58 @@
+name: Test Adda247 Apps Script Proxy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test Adda247 homepage relay
+        env:
+          ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}
+          ADDA247_PROXY_SECRET: ${{ secrets.ADDA247_PROXY_SECRET }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import requests
+
+          proxy_url = os.environ.get("ADDA247_PROXY_URL", "").strip()
+          proxy_secret = os.environ.get("ADDA247_PROXY_SECRET", "")
+
+          if not proxy_url or not proxy_secret:
+              raise SystemExit("Missing ADDA247_PROXY_URL or ADDA247_PROXY_SECRET GitHub secret.")
+
+          response = requests.post(
+              proxy_url,
+              json={"secret": proxy_secret, "page": "homepage"},
+              headers={"Content-Type": "application/json"},
+              timeout=(30, 180)
+          )
+
+          print("Proxy HTTP status:", response.status_code)
+          response.raise_for_status()
+
+          try:
+              result = response.json()
+          except ValueError:
+              print("Proxy returned non-JSON. Body preview:", response.text[:500])
+              raise SystemExit("Proxy did not return valid JSON.")
+
+          print("Apps Script fetch status:", result.get("status"))
+          print("Page:", result.get("page"))
+          print("HTML length reported by Apps Script:", result.get("htmlLength"))
+          html = result.get("html", "")
+          print("HTML received by GitHub:", len(html))
+          print("HTML begins with doctype/html:", "<html" in html[:1000].lower() or "<!doctype" in html[:1000].lower())
+
+          if not result.get("ok") or result.get("status") != 200:
+              print("Proxy error:", result.get("error", "Apps Script fetch failed"))
+              raise SystemExit("Apps Script could not fetch Adda247 successfully.")
+
+          if not html or len(html) < 10000:
+              raise SystemExit("HTML response is empty or unexpectedly short.")
+
+          print("SUCCESS: GitHub received the Adda247 HTML response.")
+          PY

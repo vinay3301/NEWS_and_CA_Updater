@@ -522,47 +522,100 @@ else:
 
 
 def upload_pdf_via_apps_script(file_path, file_name):
-    """Upload one PDF to the authenticated Google Apps Script Drive bridge."""
+    """Upload a PDF through Apps Script, retrying transient network failures.
+
+    The bridge updates files by their fixed names, so repeating a request after
+    an ambiguous network timeout is safe: it updates the same Drive file rather
+    than creating duplicate PDFs.
+    """
     if not UPLOAD_BRIDGE_URL or not UPLOAD_BRIDGE_SECRET:
         raise RuntimeError("Google Apps Script upload bridge settings are missing.")
 
     import base64
 
     with open(file_path, "rb") as pdf_file:
-        encoded_pdf = base64.b64encode(pdf_file.read()).decode("ascii")
+        pdf_bytes = pdf_file.read()
 
-    response = requests.post(
-        UPLOAD_BRIDGE_URL,
-        json={
-            "secret": UPLOAD_BRIDGE_SECRET,
-            "fileName": file_name,
-            "base64": encoded_pdf
-        },
-        headers={"Content-Type": "application/json"},
-        timeout=(30, 300)
-    )
-    response.raise_for_status()
+    encoded_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+    encoded_size = len(encoded_pdf)
+    max_payload_size = 20 * 1024 * 1024  # Must match the Apps Script bridge limit.
 
-    try:
-        result = response.json()
-    except ValueError as exc:
+    if encoded_size > max_payload_size:
         raise RuntimeError(
-            "Apps Script returned a non-JSON response. Check that the Web App "
-            "deployment URL ends in /exec and is accessible."
-        ) from exc
-
-    if not result.get("ok"):
-        raise RuntimeError(
-            f"Apps Script upload failed for {file_name}: "
-            f"{result.get('error', 'Unknown error')}"
+            f"{file_name} is too large for the Apps Script bridge: "
+            f"{len(pdf_bytes) / (1024 * 1024):.2f} MB PDF "
+            f"({encoded_size / (1024 * 1024):.2f} MB base64; "
+            f"limit {max_payload_size / (1024 * 1024):.0f} MB)."
         )
 
-    print(
-        f"{COLORS['GREEN']}[+] Apps Script {result.get('action')} "
-        f"{file_name} in Google Drive (ID: {result.get('fileId')}, "
-        f"size: {result.get('size')} bytes){COLORS['RESET']}"
-    )
-    return True
+    payload = {
+        "secret": UPLOAD_BRIDGE_SECRET,
+        "fileName": file_name,
+        "base64": encoded_pdf
+    }
+
+    # Requests has no separate write-timeout argument. Its connect timeout also
+    # governs socket writes, so the former 30-second value could expire while
+    # sending a large base64 PDF even though the server was still reachable.
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(
+                f"[*] Uploading {file_name} "
+                f"({len(pdf_bytes) / (1024 * 1024):.2f} MB; "
+                f"attempt {attempt}/{max_attempts})..."
+            )
+            response = requests.post(
+                UPLOAD_BRIDGE_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=(180, 600)
+            )
+            response.raise_for_status()
+
+            try:
+                result = response.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Apps Script returned a non-JSON response. Check that the "
+                    "Web App deployment URL ends in /exec and is accessible."
+                ) from exc
+
+            if not result.get("ok"):
+                bridge_status = int(result.get("status", 0) or 0)
+                error_message = result.get("error", "Unknown error")
+                if bridge_status not in (408, 429, 500, 502, 503, 504):
+                    raise RuntimeError(
+                        f"Apps Script upload failed for {file_name}: "
+                        f"{error_message}"
+                    )
+                raise requests.exceptions.HTTPError(
+                    f"Temporary Apps Script bridge error "
+                    f"({bridge_status}): {error_message}"
+                )
+
+            print(
+                f"{COLORS['GREEN']}[+] Apps Script {result.get('action')} "
+                f"{file_name} in Google Drive (ID: {result.get('fileId')}, "
+                f"size: {result.get('size')} bytes){COLORS['RESET']}"
+            )
+            return True
+
+        except requests.exceptions.RequestException as exc:
+            if attempt >= max_attempts:
+                raise RuntimeError(
+                    f"Apps Script upload failed for {file_name} after "
+                    f"{max_attempts} attempts: {exc}"
+                ) from exc
+
+            wait_seconds = 10 * attempt
+            print(
+                f"[!] Upload attempt {attempt}/{max_attempts} failed for "
+                f"{file_name}: {exc}. Retrying in {wait_seconds} seconds..."
+            )
+            time.sleep(wait_seconds)
+
+    return False
 
 
 def get_or_create_drive_subfolder(

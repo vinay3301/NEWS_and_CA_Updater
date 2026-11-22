@@ -7,6 +7,9 @@ jobs:
   test-proxy:
     runs-on: ubuntu-latest
     steps:
+      - name: Install HTML parser dependency
+        run: python -m pip install --quiet beautifulsoup4
+
       - name: Test listing pages and one individual article
         env:
           ADDA247_PROXY_URL: ${{ secrets.ADDA247_PROXY_URL }}

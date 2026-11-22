@@ -2930,6 +2930,7 @@ def prepare_pdf_image(image_bytes, is_desktop=False):
     try:
         with PILImage.open(BytesIO(image_bytes)) as source:
             image = ImageOps.exif_transpose(source)
+            original_size = image.size
             image.thumbnail(
                 (max_dimension, max_dimension),
                 PILImage.Resampling.LANCZOS

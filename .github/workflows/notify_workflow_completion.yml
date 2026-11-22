@@ -35,7 +35,7 @@ jobs:
             --argjson workflow_run "$RUN_JSON" \
             '{secret: $secret, workflow_run: $workflow_run}')"
 
-          RESPONSE="$(curl --silent --show-error --fail-with-body --location \
+          RESPONSE="$(curl --silent --show-error --fail-with-body --location --post302 \
             --header "Content-Type: application/json" \
             --data "$PAYLOAD" \
             "$WEBHOOK_URL")"

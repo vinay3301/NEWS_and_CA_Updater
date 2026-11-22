@@ -1,6 +1,5 @@
 /**
  * NEWS & CA Updater — independent Google Apps Script scheduler.
- *
  * Separate Apps Script project; do not paste into the existing upload bridge.
  * Set project timezone to Asia/Kolkata.
  *
@@ -9,7 +8,7 @@
  *   ALERT_EMAIL   Address for scheduler/workflow alerts
  *
  * Run testGitHubConnection() first. Do NOT run setupScheduler() until the
- * GitHub Actions cron is disabled, or both schedulers may upload duplicate PDFs.
+ * GitHub Actions cron is disabled, or both schedulers may launch duplicate PDFs.
  */
 
 const CONFIG = Object.freeze({
@@ -48,11 +47,21 @@ function testGitHubConnection() {
 }
 
 /**
- * One 10-minute dispatcher checks whether a scheduled IST slot is due.
- * A 55-minute window tolerates Apps Script trigger timing drift.
- * Also installs a separate 10-minute run monitor.
+ * Install the dispatcher and monitor.
+ * Seeds the notification cursor to the latest existing run, preventing old
+ * workflow history from generating a flood of emails on first setup.
  */
 function setupScheduler() {
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty(PROP.LAST_NOTIFIED_RUN)) {
+    const existing = getWorkflowRuns_('workflow_dispatch', 100);
+    const latestId = existing.reduce(function(maxId, run) {
+      return Math.max(maxId, Number(run.id) || 0);
+    }, 0);
+    props.setProperty(PROP.LAST_NOTIFIED_RUN, String(latestId));
+    Logger.log('Notification baseline set to existing workflow run ID %s.', latestId);
+  }
+
   const handlers = ['scheduledProductionDispatch', 'monitorProductionRun'];
   ScriptApp.getProjectTriggers().forEach(function(trigger) {
     if (handlers.indexOf(trigger.getHandlerFunction()) !== -1) {
@@ -62,11 +71,10 @@ function setupScheduler() {
 
   ScriptApp.newTrigger('scheduledProductionDispatch')
     .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
-
   ScriptApp.newTrigger('monitorProductionRun')
     .timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
 
-  Logger.log('Installed one 10-minute dispatcher and one 10-minute monitor. Target slots are 02:00, 06:00, 10:00, 14:00, 18:00 and 22:00 IST.');
+  Logger.log('Installed dispatcher and monitor. Completion emails will cover both manually started and Apps Script-started workflow_dispatch runs.');
 }
 
 /** Runs every 10 minutes and dispatches at most once per configured IST slot. */
@@ -79,19 +87,15 @@ function scheduledProductionDispatch() {
 
   try {
     const props = PropertiesService.getScriptProperties();
-
-    // Never start a second job while a previous dispatch is awaiting tracking.
     if (props.getProperty(PROP.PENDING_AT)) {
-      Logger.log('A previous dispatch is still pending; waiting for monitor.');
+      Logger.log('A previous Apps Script dispatch is still pending; waiting for monitor.');
       return;
     }
 
     const now = new Date();
     const hour = Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'H'));
     const minute = Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'm'));
-    if (CONFIG.HOURS.indexOf(hour) === -1 || minute > CONFIG.SLOT_GRACE_MINUTES) {
-      return;
-    }
+    if (CONFIG.HOURS.indexOf(hour) === -1 || minute > CONFIG.SLOT_GRACE_MINUTES) return;
 
     const slot = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd-HH');
     if (props.getProperty(PROP.LAST_SLOT) === slot) {
@@ -99,7 +103,7 @@ function scheduledProductionDispatch() {
       return;
     }
 
-    const previousRuns = getWorkflowRuns_('workflow_dispatch', 20);
+    const previousRuns = getWorkflowRuns_('workflow_dispatch', 100);
     const active = previousRuns.find(function(run) {
       return run.status === 'queued' || run.status === 'in_progress';
     });
@@ -116,8 +120,6 @@ function scheduledProductionDispatch() {
     }, 0);
     const dispatchAt = Date.now();
 
-    // Save tracking state before POST. If the HTTP call times out after GitHub
-    // accepted it, the monitor can still find the run and avoid duplicate sends.
     props.setProperty(PROP.PENDING_AT, String(dispatchAt));
     props.setProperty(PROP.PENDING_BASELINE_ID, String(baselineId));
     props.setProperty(PROP.PENDING_SLOT, slot);
@@ -135,7 +137,6 @@ function scheduledProductionDispatch() {
       throw new Error('Workflow dispatch failed: HTTP ' +
         response.getResponseCode() + ' — ' + response.getContentText());
     }
-
     Logger.log('GitHub accepted workflow dispatch for IST slot %s.', slot);
   } catch (error) {
     notify_('NEWS CA scheduler could not confirm workflow dispatch',
@@ -146,57 +147,74 @@ function scheduledProductionDispatch() {
   }
 }
 
-/** Poll only for a new run created after the saved pre-dispatch baseline. */
+/**
+ * Emails the result of EVERY new workflow_dispatch run, regardless of whether
+ * it was started from GitHub's UI or by this Apps Script scheduler.
+ */
 function monitorProductionRun() {
   const props = PropertiesService.getScriptProperties();
-  const pendingAt = Number(props.getProperty(PROP.PENDING_AT) || 0);
-  if (!pendingAt) return;
 
   try {
-    const baselineId = Number(props.getProperty(PROP.PENDING_BASELINE_ID) || 0);
-    const runs = getWorkflowRuns_('workflow_dispatch', 20);
-    const run = runs.find(function(item) {
-      return Number(item.id) > baselineId &&
-        new Date(item.created_at).getTime() >= pendingAt - 2 * 60 * 1000 &&
-        item.head_branch === CONFIG.BRANCH;
-    });
+    const runs = getWorkflowRuns_('workflow_dispatch', 100);
+    const lastNotified = Number(props.getProperty(PROP.LAST_NOTIFIED_RUN) || 0);
 
-    if (!run) {
-      if (Date.now() - pendingAt > CONFIG.DISPATCH_GRACE_MINUTES * 60 * 1000) {
-        notify_('NEWS CA workflow dispatch not visible in GitHub',
-          'Apps Script sent the dispatch request, but no new matching workflow run ' +
-          'appeared within ' + CONFIG.DISPATCH_GRACE_MINUTES +
-          ' minutes. Check GitHub Actions. The slot will not be automatically retried.');
-        clearPending_(props);
-      }
-      return;
+    // API returns newest first; process in ascending ID order so an older
+    // still-running job cannot be skipped when a newer job finishes first.
+    runs.sort(function(a, b) { return Number(a.id) - Number(b.id); });
+
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      if (Number(run.id) <= lastNotified) continue;
+      if (run.head_branch !== CONFIG.BRANCH) continue;
+      if (run.status !== 'completed') break;
+
+      const successful = run.conclusion === 'success';
+      notify_(
+        successful ? 'NEWS CA workflow completed successfully' : 'NEWS CA workflow failed',
+        'Trigger: ' + run.event +
+        '\nWorkflow: ' + run.name +
+        '\nConclusion: ' + run.conclusion +
+        '\nStarted: ' + run.created_at +
+        '\nRun: ' + run.html_url +
+        (successful
+          ? '\nThe workflow completed successfully, including its PDF upload steps.'
+          : '\nOpen the run link to inspect the failed step.')
+      );
+      props.setProperty(PROP.LAST_NOTIFIED_RUN, String(run.id));
     }
 
-    if (run.status !== 'completed') return;
-
-    if (props.getProperty(PROP.LAST_NOTIFIED_RUN) === String(run.id)) {
-      clearPending_(props);
-      return;
-    }
-
-    const successful = run.conclusion === 'success';
-    notify_(
-      successful ? 'NEWS CA PDFs uploaded successfully' : 'NEWS CA production workflow failed',
-      'Workflow: ' + run.name + '\nConclusion: ' + run.conclusion +
-      '\nStarted: ' + run.created_at + '\nRun: ' + run.html_url +
-      (successful
-        ? '\nThe workflow completed successfully, including its PDF upload steps.'
-        : '\nOpen the run link to inspect the failed step.')
-    );
-
-    props.setProperty(PROP.LAST_NOTIFIED_RUN, String(run.id));
-    clearPending_(props);
+    checkPendingDispatch_(props, runs);
   } catch (error) {
-    // Keep pending state so the next monitor execution can retry the check.
     Logger.log('Run monitor error: ' + error);
     notify_('NEWS CA scheduler monitor encountered an error',
       String(error && error.stack ? error.stack : error));
     throw error;
+  }
+}
+
+/** Alert if an Apps Script dispatch never appears as a GitHub run. */
+function checkPendingDispatch_(props, runs) {
+  const pendingAt = Number(props.getProperty(PROP.PENDING_AT) || 0);
+  if (!pendingAt) return;
+
+  const baselineId = Number(props.getProperty(PROP.PENDING_BASELINE_ID) || 0);
+  const matchingRun = runs.find(function(run) {
+    return Number(run.id) > baselineId &&
+      new Date(run.created_at).getTime() >= pendingAt - 2 * 60 * 1000 &&
+      run.head_branch === CONFIG.BRANCH;
+  });
+
+  if (matchingRun) {
+    if (matchingRun.status === 'completed') clearPending_(props);
+    return;
+  }
+
+  if (Date.now() - pendingAt > CONFIG.DISPATCH_GRACE_MINUTES * 60 * 1000) {
+    notify_('NEWS CA workflow dispatch not visible in GitHub',
+      'Apps Script sent the dispatch request, but no new matching workflow run ' +
+      'appeared within ' + CONFIG.DISPATCH_GRACE_MINUTES +
+      ' minutes. Check GitHub Actions. The slot will not be automatically retried.');
+    clearPending_(props);
   }
 }
 

@@ -13,6 +13,7 @@ import requests
 import feedparser
 import urllib.request
 from io import BytesIO
+from PIL import Image as PILImage, ImageOps
 from bs4 import BeautifulSoup, NavigableString, Tag
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -2915,6 +2916,55 @@ def draw_page_decorations(canvas, doc):
         canvas.restoreState()
 
 
+# === PDF IMAGE OPTIMIZATION ===
+def prepare_pdf_image(image_bytes, is_desktop=False):
+    """Downsample and recompress embedded article images before adding them to a PDF.
+
+    Mobile output uses a smaller pixel budget because it is displayed on a
+    narrow page. Desktop retains higher resolution. The original image bytes
+    are never modified on disk or in the source article data.
+    """
+    max_dimension = 1800 if is_desktop else 1100
+    jpeg_quality = 86 if is_desktop else 82
+
+    try:
+        with PILImage.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail(
+                (max_dimension, max_dimension),
+                PILImage.Resampling.LANCZOS
+            )
+
+            # Flatten transparency onto white before JPEG encoding.
+            if image.mode in ("RGBA", "LA") or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                background = PILImage.new(
+                    "RGB", rgba.size, (255, 255, 255)
+                )
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=jpeg_quality,
+                optimize=True,
+                progressive=True
+            )
+            output.seek(0)
+            return output
+    except Exception as exc:
+        print(
+            f"[!] Image optimization skipped; using original image: {exc}"
+        )
+        return BytesIO(image_bytes)
+
+
 # === PDF GENERATOR WITH FIXED STYLING ===
 def generate_pdf_document(
     news_items,
@@ -3384,8 +3434,9 @@ def generate_pdf_document(
                     )
 
                     if img_resp.status_code == 200:
-                        img_data = BytesIO(
-                            img_resp.content
+                        img_data = prepare_pdf_image(
+                            img_resp.content,
+                            is_desktop=is_desktop
                         )
 
                         img_flowable = Image(

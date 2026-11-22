@@ -2,7 +2,7 @@
 
 An automated news and current-affairs digest generator. It collects selected news and exam-relevant current-affairs articles, builds desktop and mobile-friendly PDFs, and publishes both PDFs to Google Drive.
 
-The production workflow runs on GitHub Actions. Google Apps Script is used for the Adda247 fetch proxy and for the Google Drive upload bridge. A separate Apps Script project monitors workflow completion and emails the result.
+The production workflow runs on GitHub Actions. Google Apps Script is used for the Adda247 fetch proxy and for the Google Drive upload bridge. A separate Apps Script project sends completion emails through an immediate GitHub `workflow_run` webhook, with a 10-minute polling monitor retained as a fallback.
 
 ## Contents
 
@@ -208,23 +208,52 @@ Scheduled runs are automatically authorised to run the production job and upload
 
 ## Email notifications
 
-`GoogleAppsScript/Scheduler.gs` belongs to a separate Apps Script project. In the current setup, only its notification-monitor function is installed:
+Completion notifications cover both manually started and scheduled production runs, including successful and failed runs. The current setup has two notification paths:
 
-- `setupNotificationMonitor()` installs a time-driven trigger every 10 minutes.
-- `monitorProductionRun()` checks GitHub Actions for newly completed scheduled and manual workflow runs.
+### 1. Immediate notification — GitHub webhook (primary)
+
+The workflow file:
+
+`.github/workflows/notify_workflow_completion.yml`
+
+listens for the `completed` event of **Scheduled and Manual Production News CA PDF Update** on the `main` branch. When that production workflow finishes, GitHub starts the separate **Immediate Workflow Email Notification** workflow. It sends the completed run details to the notification Apps Script web app using an HTTP POST request.
+
+The notification workflow does not start or rerun production generation. It only reports the result of a production run. It handles both `workflow_dispatch` (manual) and `schedule` (GitHub cron) events, and forwards the run conclusion so Apps Script can send either a SUCCESS or FAILED email.
+
+### 2. Polling notification — Apps Script fallback
+
+The Apps Script function `setupNotificationMonitor()` installs a time-driven trigger every 10 minutes:
+
+- `monitorProductionRun()` checks GitHub Actions for newly completed scheduled and manual production runs.
 - It emails the configured address with the workflow result and a link to the GitHub run.
 - It seeds its notification cursor from existing workflow history during setup, so old runs are not all emailed as new notifications.
 
-The 10-minute trigger is a **monitoring interval**, not a production generation interval. It does not start a PDF run. It checks for completion and sends an email when a new run is completed.
+The 10-minute trigger is a **monitoring interval**, not a production generation interval. It does not start a PDF run. It checks for completion and serves as a fallback if an immediate webhook notification is missed.
 
-Required Script Properties for this separate monitor project:
+### Duplicate-notification protection
 
-- `GITHUB_TOKEN` — a GitHub fine-grained personal access token with Actions read and write permission for this repository (write is needed only if using the optional dispatcher).
-- `ALERT_EMAIL` — the address that should receive workflow notifications.
+Both notification paths use the Script Property `LAST_NOTIFIED_RUN_ID` as a shared run-ID cursor. The webhook checks the cursor before sending and updates it after the email call; the polling monitor also skips run IDs at or below the cursor. The webhook handler additionally uses a script lock to serialize webhook requests.
+
+This prevents the normal sequential case where the webhook and polling monitor both try to notify the same already-processed run. The two paths are independent executions, however, and the polling function currently does not acquire the same script lock. A very narrow timing race if both paths begin processing the same run simultaneously is therefore still theoretically possible; this is not an absolute exactly-once delivery guarantee. The monitor can be removed after the webhook has been observed working reliably if a single notification path is preferred.
+
+### Notification configuration
+
+In the separate Apps Script project containing `Scheduler.gs`, configure these Script Properties:
+
+- `ALERT_EMAIL` — destination email address.
+- `GITHUB_TOKEN` — GitHub fine-grained personal access token with Actions read permission for this repository (write is needed only if using the optional Apps Script dispatcher).
+- `WEBHOOK_SECRET` — shared secret used to authenticate incoming completion webhook requests.
 
 Set the Apps Script project time zone to `Asia/Kolkata`.
 
-The optional `setupScheduler()` function installs both an Apps Script dispatcher and the monitor. It is an alternative scheduling arrangement, not something to enable alongside the active GitHub cron. If switching schedulers in the future, disable the GitHub cron first and deliberately migrate to the Apps Script dispatcher.
+Deploy the notification Apps Script as a web app that executes as the script owner and is accessible to the webhook caller. Store its deployed `/exec` URL in the GitHub Actions repository secret `NOTIFICATION_WEBHOOK_URL`. Store the same secret value as Apps Script Script Property `WEBHOOK_SECRET` and GitHub Actions repository secret `NOTIFICATION_WEBHOOK_SECRET`. Do not put either secret value in this README or source control.
+
+The GitHub notification workflow requires these repository secrets:
+
+- `NOTIFICATION_WEBHOOK_URL` — deployed notification Apps Script web-app URL.
+- `NOTIFICATION_WEBHOOK_SECRET` — must match the Apps Script `WEBHOOK_SECRET` property.
+
+The optional `setupScheduler()` function installs both an Apps Script dispatcher and the polling monitor. It is an alternative production scheduling arrangement, not something to enable alongside the active GitHub cron. If switching schedulers in the future, disable the GitHub cron first and deliberately migrate to the Apps Script dispatcher.
 
 ## Repository layout
 
@@ -233,6 +262,7 @@ The optional `setupScheduler()` function installs both an Apps Script dispatcher
 ├── .github/
 │   └── workflows/
 │       ├── manual_production_update.yml
+│       ├── notify_workflow_completion.yml
 │       ├── test_adda_proxy.yml
 │       └── test_adda_python_proxy.yml
 ├── GoogleAppsScript/
@@ -248,7 +278,7 @@ The optional `setupScheduler()` function installs both an Apps Script dispatcher
 |---|---|
 | `News_CA_Updater.py` | Main production scraper, extractor, PDF generator, and upload client |
 | `requirements.txt` | Python dependencies |
-| `.github/workflows/manual_production_update.yml` | Scheduled and manually approved production workflow |
+| `.github/workflows/manual_production_update.yml` | Scheduled and manually approved production workflow |\n| `.github/workflows/notify_workflow_completion.yml` | Sends an immediate completion webhook for production workflow success or failure |
 | `.github/workflows/test_adda_proxy.yml` | Adda247 proxy diagnostic workflow |
 | `.github/workflows/test_adda_python_proxy.yml` | Python-to-proxy integration diagnostic workflow |
 | `GoogleAppsScript/Code.gs` | Google Drive PDF upload bridge |
@@ -281,9 +311,9 @@ Enable the Advanced Google service **Drive API v3** in that Apps Script project.
 
 In the separate Apps Script project used for Adda247 fetching, configure `PROXY_SECRET` to match the GitHub Actions secret `ADDA247_PROXY_SECRET`. Use the deployed web-app URL for `ADDA247_PROXY_URL`.
 
-### Notification monitor Script Properties
+### Notification Apps Script Script Properties
 
-In the separate Apps Script project containing `Scheduler.gs`, configure `GITHUB_TOKEN` and `ALERT_EMAIL` as described in [Email notifications](#email-notifications).
+In the separate Apps Script project containing `Scheduler.gs`, configure `GITHUB_TOKEN`, `ALERT_EMAIL`, and `WEBHOOK_SECRET` as described in [Email notifications](#email-notifications).
 
 ## Android download workflow
 
@@ -313,7 +343,7 @@ Confirm that `GOOGLE_APPS_SCRIPT_URL` and `GOOGLE_APPS_SCRIPT_SECRET` are config
 
 ### No email arrives
 
-Check the notification project's `ALERT_EMAIL` and `GITHUB_TOKEN` Script Properties, its Apps Script execution log, and whether the `monitorProductionRun` time-driven trigger exists. Remember that this monitor checks every 10 minutes; it does not email every time it polls.
+Check the notification project's `ALERT_EMAIL`, `GITHUB_TOKEN`, and `WEBHOOK_SECRET` Script Properties. For immediate notifications, inspect the **Immediate Workflow Email Notification** GitHub Actions run and the Apps Script execution log; confirm that the `NOTIFICATION_WEBHOOK_URL` and `NOTIFICATION_WEBHOOK_SECRET` repository secrets are configured. The 10-minute `monitorProductionRun` trigger is only the fallback and does not email every time it polls.
 
 ### A PDF exists but an article is incomplete
 
@@ -335,7 +365,7 @@ A successful run means the pipeline completed, not necessarily that every source
 - **Manual production generation:** GitHub Actions workflow dispatch with `confirm_drive_upload=yes`.
 - **Adda247 fetching:** separate Apps Script proxy.
 - **PDF upload:** separate Apps Script Drive bridge.
-- **Completion email:** Apps Script notification monitor, polling every 10 minutes.
+- **Completion email:** immediate GitHub `workflow_run` notification workflow → Apps Script webhook; 10-minute Apps Script polling monitor retained as fallback.
 - **Android PDF download:** FolderSync from Drive's `Mobile` folder.
 
 The GitHub cron remains the only active production scheduler in this arrangement.

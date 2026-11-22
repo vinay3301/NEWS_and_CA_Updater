@@ -23,7 +23,7 @@ jobs:
       - name: Install production dependencies
         run: python -m pip install --quiet -r requirements.txt
 
-      - name: Compile scraper and test Adda247 recovery safeguards
+      - name: Compile scraper and test Adda247 recovery and PDF fallback safeguards
         env:
           GITHUB_ACTIONS: "true"
           GOOGLE_APPS_SCRIPT_URL: "https://test.invalid/"
@@ -77,7 +77,7 @@ jobs:
           incomplete = scraper.retry_incomplete_adda247_articles([row], object())
           assert len(incomplete) == 1
           assert incomplete[0]["content_extracted"] is False
-          print("PASS: persistently incomplete article is reported for upload blocking.")
+          print("PASS: persistently incomplete article is retained for headline + source-link PDF fallback.")
           PY
 
       - name: Run production Adda247 scraper functions in isolated test mode

@@ -16,7 +16,7 @@ The production workflow runs on GitHub Actions. Google Apps Script is used for t
 - [Email notifications](#email-notifications)
 - [Repository layout](#repository-layout)
 - [Configuration and secrets](#configuration-and-secrets)
-- [Android download workflow](#android-download-workflow)
+- [Termux setup and GitHub dispatch helper](#termux-setup-and-github-dispatch-helper)\n- [Android download workflow](#android-download-workflow)
 - [Troubleshooting](#troubleshooting)
 - [Security notes](#security-notes)
 
@@ -191,6 +191,63 @@ The workflow has a 90-minute job timeout. Its concurrency group prevents overlap
 
 **The GitHub Actions cron is the active production scheduler.** The optional Apps Script production dispatcher in `GoogleAppsScript/Scheduler.gs` is not enabled in the current setup. Do not run `setupScheduler()` while the GitHub cron is active, because that would introduce a second scheduler and could cause duplicate runs.
 
+## Termux setup and GitHub dispatch helper
+
+Termux is an optional Android-side command-line environment. It was prepared with Cronie so Android can run existing local scheduled commands, and it contains a helper script that can request a production GitHub Actions run. **Autosync, not Termux, is responsible for downloading the mobile PDF to the phone.**
+
+### Packages and cron service
+
+The Termux packages and service setup commands used are:
+
+```bash
+pkg update && pkg upgrade -y
+pkg install cronie nano
+sv-enable crond
+sv up crond
+```
+
+The `termux-services` package is also required for the `sv` service commands. The cron daemon is managed by Termux's runit service supervisor.
+
+### GitHub dispatch credentials
+
+A fine-grained GitHub personal access token was created with access limited to this repository and Actions read/write permissions. The token is stored locally in:
+
+```text
+~/.config/news-ca/github.env
+```
+
+The file contains a shell variable assignment (do not commit or share the file):
+
+```bash
+GITHUB_TOKEN='YOUR_FINE_GRAINED_TOKEN'
+```
+
+The configuration directory and token file are protected with:
+
+```bash
+mkdir -p ~/.config/news-ca
+chmod 700 ~/.config/news-ca
+chmod 600 ~/.config/news-ca/github.env
+```
+
+### Dispatch helper
+
+The executable helper is located at `~/scripts/github-dispatch.sh`. It reads the token from the protected environment file and dispatches `.github/workflows/manual_production_update.yml` on branch `main`, with `confirm_drive_upload=yes`.
+
+Its permissions are restricted with:
+
+```bash
+chmod 700 ~/scripts/github-dispatch.sh
+```
+
+The helper's successful response (HTTP 204 from GitHub) means GitHub accepted the dispatch request; it does **not** mean the workflow has finished. Workflow completion and success must be checked in GitHub Actions, and the separate notification workflow sends the completion email.
+
+### Scheduling status and separation of responsibilities
+
+The dispatch helper has been manually invoked successfully, but it has **not yet been added as a recurring Termux cron job**. The GitHub Actions cron described in [Automation schedule](#automation-schedule) remains the active production scheduler. Do not add a second production schedule or disable the GitHub cron without deliberately migrating and verifying the scheduling arrangement.
+
+Existing Termux cron entries for other local tasks are separate from the GitHub production workflow. Preserve them unless they are intentionally retired. Autosync operates independently and periodically downloads the updated mobile PDF from Drive.
+
 ## Manual runs
 
 To start a production run manually:
@@ -313,11 +370,21 @@ In the separate Apps Script project containing `Scheduler.gs`, configure `GITHUB
 
 ## Android download workflow
 
-Android delivery is a separate client-side step; it is not performed by GitHub Actions itself.
+Android delivery is handled by **Autosync for Google Drive** (MetaCtrl), not by GitHub Actions, Apps Script, or Termux. The production workflow uploads `Daily_Articles_Mobile.pdf` to the Google Drive `Mobile` subfolder. Autosync downloads that file to the configured local phone folder.
 
-FolderSync can download the mobile PDF from the Google Drive `Mobile` folder to a dedicated phone folder such as `Download/Daily Articles`. Configure the folder pair as a one-way **To local folder** sync, filter it to `Daily_Articles_Mobile.pdf`, keep overwrite enabled, and keep sync deletions disabled so unrelated phone files are not removed.
+Recommended folder-pair configuration:
 
-The configured FolderSync schedule can periodically check Drive for an updated PDF. FolderSync must be allowed to run in the background by Android. The phone does not need to run the Python generator or keep Termux active for the GitHub-hosted production workflow.
+- **Remote folder:** the Google Drive `Mobile` folder.
+- **Local folder:** a dedicated folder such as `Download/News_CA`.
+- **Sync direction:** download only / cloud to local.
+- **File selection:** synchronize `Daily_Articles_Mobile.pdf`.
+- **Overwrite:** enabled, so the local copy is replaced when Drive has a newer version.
+- **Delete synchronization:** disabled, to avoid deleting unrelated local or cloud files.
+- **Background operation:** allow Autosync to run in the background and configure Android battery restrictions as needed.
+
+Autosync's interval and background timing are controlled by the app and Android. The phone does not need to run the Python generator or keep Termux active for the GitHub-hosted production workflow. Apps Script cannot directly write files into Android local storage; it uploads the PDF to Drive, and Autosync handles the phone download.
+
+The previous FolderSync instructions are obsolete; Autosync for Google Drive is the selected synchronization app.
 
 ## Troubleshooting
 
@@ -362,6 +429,6 @@ A successful run means the pipeline completed, not necessarily that every source
 - **Adda247 fetching:** separate Apps Script proxy.
 - **PDF upload:** separate Apps Script Drive bridge.
 - **Completion email:** immediate GitHub `workflow_run` notification workflow → Apps Script webhook; 10-minute Apps Script polling monitor retained as fallback.
-- **Android PDF download:** FolderSync from Drive's `Mobile` folder.
+- **Termux:** Cronie is installed and the GitHub dispatch helper is configured; recurring Termux production dispatch is not enabled.\n- **Android PDF download:** Autosync for Google Drive downloads the `Mobile/Daily_Articles_Mobile.pdf` file to the configured local folder.
 
 The GitHub cron remains the only active production scheduler in this arrangement.

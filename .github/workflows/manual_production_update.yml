@@ -57,7 +57,7 @@ jobs:
           GOOGLE_APPS_SCRIPT_URL: ${{ secrets.GOOGLE_APPS_SCRIPT_URL }}
           GOOGLE_APPS_SCRIPT_SECRET: ${{ secrets.GOOGLE_APPS_SCRIPT_SECRET }}
         run: python -u News_CA_Updater.py
-- name: Send completion email notification
+      - name: Send completion email notification
         if: always()
         continue-on-error: true
         env:

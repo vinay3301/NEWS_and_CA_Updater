@@ -234,7 +234,7 @@ Its permissions are restricted with:
 chmod 700 ~/scripts/github-dispatch.sh
 ```
 
-The helper's successful response (HTTP 204 from GitHub) means GitHub accepted the dispatch request; it does **not** mean the workflow has finished. Workflow completion and success must be checked in GitHub Actions, and the separate notification workflow sends the completion email.
+The helper's successful response (HTTP 204 from GitHub) means GitHub accepted the dispatch request; it does **not** mean the workflow has finished. Workflow completion and success must be checked in GitHub Actions. The production workflow's final notification step sends the completion email through the separate Apps Script webhook.
 
 ### Scheduling status and separation of responsibilities
 
@@ -261,13 +261,13 @@ Scheduled runs are automatically authorised to run the production job and upload
 
 ## Email notifications
 
-Completion emails are sent directly by the **production workflow** for both successful and failed runs, including runs dispatched by Termux and runs started manually in GitHub Actions.
+Completion emails are sent directly by the **production workflow** for both successful and failed runs, including runs dispatched by Termux and runs started manually in GitHub Actions. The notification step allows up to **120 seconds** for the Apps Script webhook to return its response, accommodating slower webhook execution.
 
 ### Direct completion webhook
 
 At the end of .github/workflows/manual_production_update.yml, the step **Send completion email notification** runs with if: always(). It posts the production run ID, run URL, event, timing, and final conclusion to the notification Apps Script web app.
 
-The notification step uses continue-on-error: true. Therefore, a webhook or email-notification failure is reported in that step's log but does not change the production job's success/failure result or undo a completed PDF upload.
+The notification step uses `continue-on-error: true`. Therefore, a webhook or email-notification failure is reported in that step's log but does not change the production job's success/failure result or undo a completed PDF upload. The Python webhook client uses a **120-second response timeout**; this controls how long GitHub Actions waits for the webhook response, not how long Apps Script is allowed to run.
 
 The conclusion is reported as success only when both the production job and the scraper/upload step succeeded. Otherwise, the notification reports failure.
 
@@ -394,7 +394,7 @@ Confirm that `GOOGLE_APPS_SCRIPT_URL` and `GOOGLE_APPS_SCRIPT_SECRET` are config
 
 ### No email arrives
 
-Inspect the **Send completion email notification** step in the production workflow run and the notification Apps Script execution log. Confirm that ALERT_EMAIL and WEBHOOK_SECRET are set in the notification project, and that the GitHub Actions secrets NOTIFICATION_WEBHOOK_URL and NOTIFICATION_WEBHOOK_SECRET are configured and match. The notification step uses continue-on-error: true, so a notification failure does not fail an otherwise successful production run.
+Inspect the **Send completion email notification** step in the production workflow run and the notification Apps Script execution log. Confirm that ALERT_EMAIL and WEBHOOK_SECRET are set in the notification project, and that the GitHub Actions secrets NOTIFICATION_WEBHOOK_URL and NOTIFICATION_WEBHOOK_SECRET are configured and match. The GitHub Actions client waits up to 120 seconds for the webhook response. If that client-side wait times out, it does not by itself prove whether Apps Script already sent the email; check the Apps Script execution log and the inbox. The notification step uses `continue-on-error: true`, so a notification failure does not fail an otherwise successful production run.
 
 ### A PDF exists but an article is incomplete
 
